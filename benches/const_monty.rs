@@ -68,21 +68,21 @@ fn bench_montgomery_ops<M: Measurement>(group: &mut BenchmarkGroup<'_, M>) {
         )
     });
 
-    // group.bench_function("double, U256", |b| {
-    //     b.iter_batched(
-    //         || ConstMontyForm::random(&mut OsRng),
-    //         |a| black_box(a).double(),
-    //         BatchSize::SmallInput,
-    //     )
-    // });
+    group.bench_function("double, U256", |b| {
+        b.iter_batched(
+            || ConstMontyForm::random(&mut OsRng),
+            |a| black_box(a).double(),
+            BatchSize::SmallInput,
+        )
+    });
 
-    // group.bench_function("double, U256, unsaturated", |b| {
-    //     b.iter_batched(
-    //         || UnsatConstMontyForm::random(&mut OsRng),
-    //         |a| black_box(a).double(),
-    //         BatchSize::SmallInput,
-    //     )
-    // });
+    group.bench_function("double, U256, unsaturated", |b| {
+        b.iter_batched(
+            || UnsatConstMontyForm::random(&mut OsRng),
+            |a| black_box(a).double(),
+            BatchSize::SmallInput,
+        )
+    });
 
     group.bench_function("sub, U256", |b| {
         b.iter_batched(

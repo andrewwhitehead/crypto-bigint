@@ -1,18 +1,37 @@
 //! Additions between integers in Montgomery form with a constant modulus.
 
 use super::{ConstMontyForm, ConstMontyParams};
-use crate::modular::add::add_montgomery_form;
+use crate::modular::add::{
+    add_montgomery_form, add_montgomery_form_unsaturated, double_montgomery_form,
+    double_montgomery_form_unsaturated,
+};
 use core::ops::{Add, AddAssign};
 
 impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstMontyForm<MOD, LIMBS> {
     /// Adds `rhs`.
     pub const fn add(&self, rhs: &ConstMontyForm<MOD, LIMBS>) -> Self {
         Self {
-            montgomery_form: add_montgomery_form(
-                &self.montgomery_form,
-                &rhs.montgomery_form,
-                &MOD::MODULUS,
-            ),
+            montgomery_form: if MOD::MODULUS_LEADING_ZEROS > 0 {
+                add_montgomery_form_unsaturated(
+                    &self.montgomery_form,
+                    &rhs.montgomery_form,
+                    &MOD::MODULUS,
+                )
+            } else {
+                add_montgomery_form(&self.montgomery_form, &rhs.montgomery_form, &MOD::MODULUS)
+            },
+            phantom: core::marker::PhantomData,
+        }
+    }
+
+    /// Double `self`.
+    pub const fn double(&self) -> Self {
+        Self {
+            montgomery_form: if MOD::MODULUS_LEADING_ZEROS > 0 {
+                double_montgomery_form_unsaturated(&self.montgomery_form, &MOD::MODULUS)
+            } else {
+                double_montgomery_form(&self.montgomery_form, &MOD::MODULUS)
+            },
             phantom: core::marker::PhantomData,
         }
     }

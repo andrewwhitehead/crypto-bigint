@@ -19,6 +19,54 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         w.wrapping_add(&p.bitand_limb(mask))
     }
 
+    /// Computes `self + rhs mod p`.
+    ///
+    /// Assumes `self + rhs` as unbounded integer is `< 2p` and `p`
+    /// has one or more leading zeros.
+    pub(crate) const fn add_mod_unsaturated(&self, rhs: &Self, p: &Self) -> Self {
+        let (w, _) = self.adc(rhs, Limb::ZERO);
+
+        // Attempt to subtract the modulus, to ensure the result is in the field.
+        let (w, mask) = w.sbb(p, Limb::ZERO);
+
+        // If underflow occurred on the final limb, borrow = 0xfff...fff, otherwise
+        // borrow = 0x000...000. Thus, we use it as a mask to conditionally add the
+        // modulus.
+        w.wrapping_add(&p.bitand_limb(mask))
+    }
+
+    /// Computes `self + self mod p`.
+    ///
+    /// Assumes `self` as unbounded integer is `< p`.
+    pub const fn double_mod(&self, p: &Self) -> Self {
+        let (w, carry) = self.overflowing_shl1();
+
+        // Attempt to subtract the modulus, to ensure the result is in the field.
+        let (w, borrow) = w.sbb(p, Limb::ZERO);
+        let (_, mask) = carry.sbb(Limb::ZERO, borrow);
+
+        // If underflow occurred on the final limb, borrow = 0xfff...fff, otherwise
+        // borrow = 0x000...000. Thus, we use it as a mask to conditionally add the
+        // modulus.
+        w.wrapping_add(&p.bitand_limb(mask))
+    }
+
+    /// Computes `self + self mod p`.
+    ///
+    /// Assumes `self` as unbounded integer is `< p` and `p` has one or more
+    /// leading zeros.
+    pub(crate) const fn double_mod_unsaturated(&self, p: &Self) -> Self {
+        let w = self.shl1();
+
+        // Attempt to subtract the modulus, to ensure the result is in the field.
+        let (w, mask) = w.sbb(p, Limb::ZERO);
+
+        // If underflow occurred on the final limb, borrow = 0xfff...fff, otherwise
+        // borrow = 0x000...000. Thus, we use it as a mask to conditionally add the
+        // modulus.
+        w.wrapping_add(&p.bitand_limb(mask))
+    }
+
     /// Computes `self + rhs mod p` for the special modulus
     /// `p = MAX+1-c` where `c` is small enough to fit in a single [`Limb`].
     ///

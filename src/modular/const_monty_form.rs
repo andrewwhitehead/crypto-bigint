@@ -40,6 +40,8 @@ pub trait ConstMontyParams<const LIMBS: usize>:
 
     /// The constant modulus
     const MODULUS: Odd<Uint<LIMBS>>;
+    /// The number of leading zero bits in the modulus
+    const MODULUS_LEADING_ZEROS: u32;
     /// 1 in Montgomery form
     const ONE: Uint<LIMBS>;
     /// `R^2 mod MODULUS`, used to move into Montgomery form

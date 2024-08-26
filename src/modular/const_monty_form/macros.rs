@@ -22,6 +22,7 @@ macro_rules! impl_modulus {
         {
             const LIMBS: usize = <$uint_type>::LIMBS;
             const MODULUS: $crate::Odd<$uint_type> = $crate::Odd::<$uint_type>::from_be_hex($value);
+            const MODULUS_LEADING_ZEROS: u32 = Self::MODULUS.as_ref().leading_zeros();
 
             // `R mod MODULUS` where `R = 2^BITS`.
             // Represents 1 in Montgomery form.
