@@ -2,7 +2,8 @@
 
 use super::{ConstMontyForm, ConstMontyParams};
 use crate::{
-    ConstCtOption, Invert, Inverter, Odd, PrecomputeInverter, Uint, modular::SafeGcdInverter,
+    ConstCtOption, Invert, Inverter, JacobiSymbol, Odd, PrecomputeInverter, Uint,
+    modular::SafeGcdInverter,
 };
 use core::{fmt, marker::PhantomData};
 use subtle::CtOption;
@@ -183,6 +184,12 @@ where
             phantom: PhantomData,
         };
         ConstCtOption::new(ret, is_some)
+    }
+
+    /// Returns the Jacobi symbol `(value|modulus)`.
+    pub const fn jacobi_mod(&self, value: &ConstMontyForm<MOD, SAT_LIMBS>) -> JacobiSymbol {
+        let inner = value.retrieve();
+        self.inverter.jacobi_uint_mod(&inner)
     }
 }
 

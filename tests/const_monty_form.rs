@@ -5,7 +5,7 @@ mod common;
 use common::to_biguint;
 use crypto_bigint::{U256, const_monty_params, modular::ConstMontyParams};
 use num_bigint::BigUint;
-use num_modular::ModularUnaryOps;
+use num_modular::{ModularSymbols, ModularUnaryOps};
 use proptest::prelude::*;
 
 const_monty_params!(
@@ -70,5 +70,18 @@ proptest! {
             (None, None) => (),
             (_, _) => panic!("disagreement on if modular inverse exists")
         }
+    }
+
+    #[test]
+    fn precomputed_jacobi_residue(x in uint()) {
+        let x = reduce(&x);
+        let inverter = Modulus::precompute_inverter();
+        let actual = inverter.jacobi_mod(&x);
+
+        let x_bi = retrieve_biguint(&x);
+        let n_bi = to_biguint(&Modulus::MODULUS);
+        let expected = x_bi.jacobi(&n_bi);
+
+        prop_assert_eq!(actual as i8, expected);
     }
 }

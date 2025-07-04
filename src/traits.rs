@@ -1022,3 +1022,60 @@ pub trait MontyMultiplier<'a>: From<&'a <Self::Monty as Monty>::Params> {
     /// Performs a Montgomery squaring, assigning a fully reduced result to `lhs`.
     fn square_assign(&mut self, lhs: &mut Self::Monty);
 }
+
+/// Result values from Jacobi symbol calculation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(i8)]
+pub enum JacobiSymbol {
+    /// The inputs are not coprime.
+    Zero = 0,
+
+    /// There are an even number of prime factors of `m` for which
+    /// `a` is not quadratic residue. If `m` is prime, then `a` is
+    /// quadratic residue modulo `m`.
+    One = 1,
+
+    /// The value `a` is not quadratic residue modulo `m`.
+    MinusOne = -1,
+}
+
+impl JacobiSymbol {
+    pub(crate) const fn from_i8(val: i8) -> Self {
+        match val {
+            0 => JacobiSymbol::Zero,
+            1 => JacobiSymbol::One,
+            -1 => JacobiSymbol::MinusOne,
+            _ => panic!("invalid Jacobi symbol result"),
+        }
+    }
+}
+
+impl ConstantTimeEq for JacobiSymbol {
+    fn ct_eq(&self, other: &Self) -> Choice {
+        (*self as i8).ct_eq(&(*other as i8))
+    }
+}
+
+impl ConditionallySelectable for JacobiSymbol {
+    fn conditional_select(a: &Self, b: &Self, choice: Choice) -> Self {
+        JacobiSymbol::from_i8(i8::conditional_select(&(*a as i8), &(*b as i8), choice))
+    }
+}
+
+/// Variable-time Jacobi symbol calculation for integers.
+pub trait JacobiVartime<Rhs = Odd<Self>> {
+    /// Return the Jacobi symbol for this integer over an odd integer `m`.
+    ///
+    /// For an odd prime integer `m`, this is equal to the Legendre symbol.
+    /// This method is variable time only in the maximum number of bits in `self`
+    /// and `m`.
+    fn jacobi_vartime(&self, m: &Rhs) -> JacobiSymbol;
+}
+
+/// Jacobi symbol calculation for integers represented modulo an odd modulus.
+pub trait JacobiMod {
+    /// Return the Jacobi symbol for this value over the modulus.
+    ///
+    /// For an odd prime modulus, this is equal to the Legendre symbol.
+    fn jacobi_mod(&self) -> JacobiSymbol;
+}

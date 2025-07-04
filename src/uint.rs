@@ -40,6 +40,7 @@ pub(crate) mod encoding;
 mod from;
 mod gcd;
 mod invert_mod;
+mod jacobi;
 pub(crate) mod mul;
 mod mul_mod;
 mod neg;

@@ -18,7 +18,7 @@ mod macros;
 #[cfg(feature = "alloc")]
 pub(crate) mod boxed;
 
-use crate::{ConstChoice, ConstCtOption, Inverter, Limb, Odd, Uint, Word};
+use crate::{ConstChoice, ConstCtOption, Int, Inverter, JacobiSymbol, Limb, Odd, Uint, Word};
 use subtle::CtOption;
 
 /// Modular multiplicative inverter based on the Bernstein-Yang method.
@@ -169,6 +169,51 @@ impl<const SAT_LIMBS: usize, const UNSAT_LIMBS: usize> SafeGcdInverter<SAT_LIMBS
         value = UnsatInt::select(&value, &value.add(&self.modulus), value.is_negative());
         value
     }
+
+    /// Return the Jacobi symbol `(a|m)`.
+    ///
+    /// This is defined on this type to piggyback on the definitions for `SAT_LIMBS` and
+    /// `UNSAT_LIMBS` which are computed when defining `PrecomputeInverter::Inverter` for various
+    /// `Uint` limb sizes.
+    ///
+    /// This method is variable time only in the maximum of the number of bits for `a` and `m`.
+    pub(crate) const fn jacobi_int_vartime(
+        a: &Int<SAT_LIMBS>,
+        m: &Odd<Int<SAT_LIMBS>>,
+    ) -> JacobiSymbol {
+        jacobi_vartime(
+            UnsatInt::from_int(m.as_ref()),
+            UnsatInt::<UNSAT_LIMBS>::from_int(a),
+        )
+    }
+
+    /// Return the Jacobi symbol `(a|m)`.
+    ///
+    /// This is defined on this type to piggyback on the definitions for `SAT_LIMBS` and
+    /// `UNSAT_LIMBS` which are computed when defining `PrecomputeInverter::Inverter` for various
+    /// `Uint` limb sizes.
+    ///
+    /// This method is variable time only in the maximum of the number of bits for `a` and `m`.
+    pub(crate) const fn jacobi_uint_vartime(
+        a: &Uint<SAT_LIMBS>,
+        m: &Odd<Uint<SAT_LIMBS>>,
+    ) -> JacobiSymbol {
+        jacobi_vartime(
+            UnsatInt::from_uint(m.as_ref()),
+            UnsatInt::<UNSAT_LIMBS>::from_uint(a),
+        )
+    }
+
+    /// Return the Jacobi symbol `(a|m)`.
+    ///
+    /// This is defined on this type to piggyback on the definitions for `SAT_LIMBS` and
+    /// `UNSAT_LIMBS` which are computed when defining `PrecomputeInverter::Inverter` for various
+    /// `Uint` limb sizes.
+    ///
+    /// This method is constant time assuming `a < m`.
+    pub(crate) const fn jacobi_uint_mod(&self, a: &Uint<SAT_LIMBS>) -> JacobiSymbol {
+        jacobi_vartime(self.modulus, UnsatInt::<UNSAT_LIMBS>::from_uint(a))
+    }
 }
 
 impl<const SAT_LIMBS: usize, const UNSAT_LIMBS: usize> Inverter
@@ -313,6 +358,103 @@ const fn jump(f: &[u64], g: &[u64], mut delta: i64) -> (i64, Matrix) {
     (delta, t)
 }
 
+/// Compute the Jacobi symbol `(g|f)` for odd `f`.
+///
+/// Adapted from "Faster constant-time evaluation of the Kronecker symbol with
+/// application to elliptic curve hashing" <https://eprint.iacr.org/2023/1261>
+/// Algorithm 7.
+///
+/// This calculates a Jacobi symbol rather than a Kronecker symbol as it
+/// is restricted to odd values of `f`. For a prime `f` this corresponds to
+/// the Legendre symbol.
+///
+/// Execution time should vary only in the maximum of the number of bits in `f`
+/// and `g`. For a constant modulus `f > g` the execution time should also be
+/// constant.
+const fn jacobi_vartime<const LIMBS: usize>(
+    f: UnsatInt<LIMBS>,
+    g: UnsatInt<LIMBS>,
+) -> JacobiSymbol {
+    #[inline]
+    const fn max(a: u32, b: u32) -> u32 {
+        if a > b { a } else { b }
+    }
+
+    debug_assert!(f.is_odd().to_bool_vartime());
+    let f_neg = f.is_negative();
+    let fg_neg = f_neg.and(g.is_negative());
+    let bits = max(f.bits(), g.bits());
+    let n = (45907 * bits + 26313) / 19929;
+
+    let f_abs = UnsatInt::select(&f, &f.neg(), f_neg);
+    let (fp, k) = jacobi_jump(n, f_abs, g);
+
+    let is_one = fp.eq(&UnsatInt::ONE).or(fp.eq(&UnsatInt::MINUS_ONE)); // |f| =? 1
+    let k = is_one.select_i64(0, fg_neg.select_i64(k, -k)) as i8;
+    JacobiSymbol::from_i8(k)
+}
+
+/// Compute the Jacobi symbol `(g|f)` over a number of steps `n`.
+///
+/// Adapted from "Faster constant-time evaluation of the Kronecker symbol with
+/// application to elliptic curve hashing" <https://eprint.iacr.org/2023/1261>
+/// Algorithm 6.
+///
+/// The input `f` must be odd and positive.
+const fn jacobi_jump<const LIMBS: usize>(
+    n: u32,
+    mut f: UnsatInt<LIMBS>,
+    mut g: UnsatInt<LIMBS>,
+) -> (UnsatInt<LIMBS>, i64) {
+    #[inline]
+    const fn msb(val: i64) -> u64 {
+        (val as u64) >> 63
+    }
+
+    debug_assert!(f.is_odd().and(f.is_negative().not()).to_bool_vartime());
+    let mut delta = 1i64;
+    let mut steps = n.div_ceil(UnsatInt::<LIMBS>::LIMB_BITS as u32);
+    let mut k = 0u64;
+
+    while steps > 0 {
+        let (mut fp, mut gp) = (f.lowest_saturated() as i64, g.lowest_saturated() as i64);
+        let mut u = 0;
+        let mut t: Matrix = [[1, 0], [0, 1]];
+        let mut j = 0;
+
+        while j < UnsatInt::<LIMBS>::LIMB_BITS {
+            let y = fp;
+            let d0 = ConstChoice::from_u64_nonzero(msb(delta)).not();
+            let m1 = ConstChoice::from_u64_nonzero((gp & 1) as u64);
+            let m0 = d0.and(m1);
+            let t0 = d0.select_i64(fp, -fp);
+            let t1 = d0.select_i64(t[1][0], -t[1][0]);
+            let t2 = d0.select_i64(t[1][1], -t[1][1]);
+            gp = m1.select_i64(gp, gp.wrapping_add(t0));
+            t[0][0] = m1.select_i64(t[0][0], t[0][0].wrapping_add(t1));
+            t[0][1] = m1.select_i64(t[0][1], t[0][1].wrapping_add(t2));
+            fp = m0.select_i64(fp, fp.wrapping_add(gp));
+            t[1][0] = m0.select_i64(t[1][0], t[1][0].wrapping_add(t[0][0]));
+            t[1][1] = m0.select_i64(t[1][1], t[1][1].wrapping_add(t[0][1]));
+            gp >>= 1;
+            t[1][0] = t[1][0].wrapping_mul(2);
+            t[1][1] = t[1][1].wrapping_mul(2);
+            delta = m0.select_i64(2 + delta, 2 - delta);
+            u += (((y & fp) ^ (fp >> 1)) & 2) as u64;
+            u += (u & 1) ^ msb(t[1][0]);
+            j += 1;
+        }
+
+        (g, f) = fg(g, f, t);
+        k = k.wrapping_add(u) & 3;
+        k += ((k & 1) ^ f.is_negative().to_u8() as u64) & 3;
+        steps -= 1;
+    }
+
+    let t = ((k + (k & 1)) & 3) as i64;
+    (f, 1 - t)
+}
+
 /// Returns the updated values of the variables f and g for specified initial ones and
 /// Bernstein-Yang transition matrix multiplied by 2^62.
 ///
@@ -409,6 +551,26 @@ impl<const LIMBS: usize> UnsatInt<LIMBS> {
         ret.0[0] = 1;
         ret
     };
+
+    /// Convert from 32/64-bit saturated representation used by `Uint` to the 62-bit unsaturated
+    /// representation used by `UnsatInt`.
+    ///
+    /// Returns a big signed integer as an array of 62-bit chunks, which is equal modulo
+    /// 2 ^ (62 * S) to the input big signed integer stored as an array of 64-bit chunks.
+    ///
+    /// The ordering of the chunks in these arrays is little-endian.
+    #[allow(trivial_numeric_casts)]
+    pub const fn from_int<const SAT_LIMBS: usize>(input: &Int<SAT_LIMBS>) -> Self {
+        if LIMBS != safegcd_nlimbs!(SAT_LIMBS * Limb::BITS as usize) {
+            panic!("incorrect number of limbs");
+        }
+
+        let init = input.is_negative().select_u64(0, Self::MASK);
+        let mut output = [init; LIMBS];
+        impl_limb_convert!(Word, Word::BITS as usize, input.as_words(), u64, 62, output);
+
+        Self(output)
+    }
 
     /// Convert from 32/64-bit saturated representation used by `Uint` to the 62-bit unsaturated
     /// representation used by `UnsatInt`.
@@ -545,6 +707,11 @@ impl<const LIMBS: usize> UnsatInt<LIMBS> {
     }
 
     /// Returns "true" iff the current number is negative.
+    pub const fn is_odd(&self) -> ConstChoice {
+        ConstChoice::from_u64_nonzero(self.0[0] & 1)
+    }
+
+    /// Returns "true" iff the current number is negative.
     pub const fn is_negative(&self) -> ConstChoice {
         ConstChoice::from_u64_gt(self.0[LIMBS - 1], Self::MASK >> 1)
     }
@@ -552,6 +719,12 @@ impl<const LIMBS: usize> UnsatInt<LIMBS> {
     /// Returns the lowest 62 bits of the current number.
     pub const fn lowest(&self) -> u64 {
         self.0[0]
+    }
+
+    /// Returns the lowest 64 bits of the current number.
+    pub const fn lowest_saturated(&self) -> u64 {
+        assert!(LIMBS > 0);
+        self.0[0] | (self.0[1] << Self::LIMB_BITS)
     }
 
     /// Select between two [`UnsatInt`] values in constant time.
@@ -594,9 +767,9 @@ impl<const LIMBS: usize> UnsatInt<LIMBS> {
 #[cfg(test)]
 mod tests {
     use super::iterations;
-    use crate::{PrecomputeInverter, U256};
+    use crate::{I256, PrecomputeInverter, U256};
 
-    type UnsatInt = super::UnsatInt<4>;
+    type UnsatInt = super::UnsatInt<6>;
 
     impl<const LIMBS: usize> PartialEq for crate::modular::safegcd::UnsatInt<LIMBS> {
         fn eq(&self, other: &Self) -> bool {
@@ -652,6 +825,17 @@ mod tests {
     }
 
     #[test]
+    fn unsatint_from_satint() {
+        assert_eq!(UnsatInt::from_uint(&U256::ZERO), UnsatInt::ZERO);
+        assert_eq!(UnsatInt::from_uint(&U256::ONE), UnsatInt::ONE);
+        assert_eq!(UnsatInt::from_int(&I256::ONE), UnsatInt::ONE);
+        assert_eq!(
+            UnsatInt::from_int(&I256::ONE.wrapping_neg()),
+            UnsatInt::MINUS_ONE
+        );
+    }
+
+    #[test]
     fn unsatint_is_negative() {
         assert!(!UnsatInt::ZERO.is_negative().to_bool_vartime());
         assert!(!UnsatInt::ONE.is_negative().to_bool_vartime());
@@ -680,5 +864,15 @@ mod tests {
                 0
             ]
         );
+    }
+
+    #[test]
+    fn unsatint_lowest_saturated() {
+        assert_eq!(UnsatInt::MINUS_ONE.lowest_saturated() as i64, -1);
+        assert_eq!(UnsatInt::MINUS_ONE.mul(2).lowest_saturated() as i64, -2);
+        assert_eq!(UnsatInt::ONE.lowest_saturated(), 1);
+        assert_eq!(UnsatInt::ZERO.lowest_saturated(), 0);
+        let a = UnsatInt::from_uint(&U256::MAX.shl(1));
+        assert_eq!(a.lowest_saturated(), u64::MAX << 1);
     }
 }

@@ -637,6 +637,21 @@ fn bench_sqrt(c: &mut Criterion) {
     });
 }
 
+fn bench_jacobi(c: &mut Criterion) {
+    let mut rng = make_rng();
+    let mut group = c.benchmark_group("jacobi");
+
+    let m = U256::MAX.to_odd().unwrap();
+
+    group.bench_function("jacobi_vartime, U256", |b| {
+        b.iter_batched(
+            || U256::random(&mut rng),
+            |x| x.jacobi_vartime(&m),
+            BatchSize::SmallInput,
+        )
+    });
+}
+
 criterion_group!(
     benches,
     bench_random,
@@ -647,7 +662,8 @@ criterion_group!(
     bench_shl,
     bench_shr,
     bench_invert_mod,
-    bench_sqrt
+    bench_sqrt,
+    bench_jacobi,
 );
 
 criterion_main!(benches);

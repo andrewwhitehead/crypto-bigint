@@ -2,6 +2,7 @@
 
 mod add;
 pub(super) mod invert;
+mod jacobi;
 mod lincomb;
 mod mul;
 mod neg;

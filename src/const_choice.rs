@@ -227,6 +227,12 @@ impl ConstChoice {
 
     /// Return `b` if `self` is truthy, otherwise return `a`.
     #[inline]
+    pub(crate) const fn select_i64(&self, a: i64, b: i64) -> i64 {
+        self.select_u64(a as u64, b as u64) as i64
+    }
+
+    /// Return `b` if `self` is truthy, otherwise return `a`.
+    #[inline]
     pub(crate) const fn select_u64(&self, a: u64, b: u64) -> u64 {
         a ^ (self.as_u64_mask() & (a ^ b))
     }
