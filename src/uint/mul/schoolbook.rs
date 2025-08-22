@@ -41,7 +41,6 @@ pub const fn mul_wide(lhs: &[Limb], rhs: &[Limb], lo: &mut [Limb], hi: &mut [Lim
 }
 
 /// Add the schoolbook product of two limb slices to a limb slice, returning the carry.
-#[cfg(feature = "alloc")]
 #[inline]
 #[track_caller]
 pub const fn carrying_add_mul(lhs: &[Limb], rhs: &[Limb], out: &mut [Limb]) -> Limb {
