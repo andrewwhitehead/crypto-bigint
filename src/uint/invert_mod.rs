@@ -237,7 +237,6 @@ impl<const LIMBS: usize> Odd<Uint<LIMBS>> {
         if k_bits > 0 {
             inv.limbs[k_limbs - 1] = inv.limbs[k_limbs - 1].restrict_bits(k_bits);
         }
-
         inv
     }
 }
