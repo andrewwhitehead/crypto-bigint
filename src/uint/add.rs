@@ -18,9 +18,20 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         let mut i = 0;
 
         while i < LIMBS {
-            let (w, c) = self.limbs[i].carrying_add(rhs.limbs[i], carry);
-            limbs[i] = w;
-            carry = c;
+            (limbs[i], carry) = self.limbs[i].carrying_add(rhs.limbs[i], carry);
+            i += 1;
+        }
+
+        (Self { limbs }, carry)
+    }
+
+    /// Computes `self + rhs + carry`, returning the result along with the new carry.
+    pub(crate) const fn overflowing_add_limb(&self, mut carry: Limb) -> (Self, Limb) {
+        let mut limbs = [Limb::ZERO; LIMBS];
+        let mut i = 0;
+
+        while i < LIMBS {
+            (limbs[i], carry) = self.limbs[i].overflowing_add(carry);
             i += 1;
         }
 

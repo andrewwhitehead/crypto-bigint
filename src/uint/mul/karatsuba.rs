@@ -10,13 +10,19 @@
 //!
 //! This equation is equivalent to a linear combination of three products of size `n/2`, which
 //! may each be reduced by applying the same optimization.
-//! Setting z0 = x0•y0, z1 = (x0-x1)(y1-y0), z2 = x1•y1:
-//!   x•y = z0 + (z0 - z1 + z2)•b + z2•b^2
+//! Setting z0 = x0•y0, z1 = (x0 + x1)(y1 + y0), z2 = x1•y1:
+//!   x•y = z0 + (z1 - z0 - z2)•b + z2•b^2
 //!
 //! Considering each sub-product as a tuple of integers `(lo, hi)`, the product is calculated as
 //! follows (with appropriate carries):
-//!   [z0.0, z0.0 + z0.1 - z1.0 + z2.0, z0.1 - z1.1 + z2.0 + z2.1, z2.1]
+//!   [z0.0, z0.1 + z1.0 - z0.0 - z2.0, z1.1 - z0.1 + z2.0 - z2.1, z2.1]
 //!
+//! Squaring uses a similar optimization:
+//!
+//!   x^2 = (x0 + x1•b)^2 = x0^2 + 2x0•x1•b + (x1•b)^2
+//!
+//! In this case the result may be computed by two half-size squarings and a half-size
+//! multiplication.
 
 use super::{uint_mul_limbs, uint_square_limbs};
 use crate::{ConstChoice, Limb, Uint};
@@ -27,9 +33,9 @@ use super::{schoolbook, square_limbs};
 use crate::{WideWord, Word};
 
 #[cfg(feature = "alloc")]
-pub const KARATSUBA_MIN_STARTING_LIMBS: usize = 32;
+pub const KARATSUBA_MIN_STARTING_LIMBS: usize = 16;
 #[cfg(feature = "alloc")]
-pub const KARATSUBA_MAX_REDUCE_LIMBS: usize = 24;
+pub const KARATSUBA_MAX_REDUCE_LIMBS: usize = 12;
 
 /// A helper struct for performing Karatsuba multiplication on Uints.
 pub(crate) struct UintKaratsubaMul<const LIMBS: usize>;
@@ -45,57 +51,47 @@ macro_rules! impl_uint_karatsuba_multiplication {
                 let (x0, x1) = lhs.split_at($half_size);
                 let (y0, y1) = rhs.split_at($half_size);
 
-                // Calculate z1 = (x0 - x1)(y1 - y0)
-                let mut l0 = Uint::<$half_size>::ZERO;
-                let mut l1 = Uint::<$half_size>::ZERO;
-                let mut l0b = Limb::ZERO;
-                let mut l1b = Limb::ZERO;
-                let mut i = 0;
-                while i < $half_size {
-                    (l0.limbs[i], l0b) = x0[i].borrowing_sub(x1[i], l0b);
-                    (l1.limbs[i], l1b) = y1[i].borrowing_sub(y0[i], l1b);
-                    i += 1;
-                }
-                l0 = Uint::select(
-                    &l0,
-                    &l0.wrapping_neg(),
-                    ConstChoice::from_word_mask(l0b.0),
-                );
-                l1 = Uint::select(
-                    &l1,
-                    &l1.wrapping_neg(),
-                    ConstChoice::from_word_mask(l1b.0),
-                );
-                let z1 = UintKaratsubaMul::<$half_size>::multiply(&l0.limbs, &l1.limbs);
-                let z1_neg = ConstChoice::from_word_mask(l0b.0)
-                    .xor(ConstChoice::from_word_mask(l1b.0));
-
-                // Conditionally add or subtract z1•b depending on its sign
-                let mut res = (Uint::ZERO, z1.0, z1.1, Uint::ZERO);
-                res.0 = Uint::select(&res.0, &res.0.not(), z1_neg);
-                res.1 = Uint::select(&res.1, &res.1.not(), z1_neg);
-                res.2 = Uint::select(&res.2, &res.2.not(), z1_neg);
-                res.3 = Uint::select(&res.3, &res.3.not(), z1_neg);
-
                 // Calculate z0 = x0•y0
                 let z0 = UintKaratsubaMul::<$half_size>::multiply(&x0, &y0);
                 // Calculate z2 = x1•y1
                 let z2 = UintKaratsubaMul::<$half_size>::multiply(&x1, &y1);
 
-                // Add z0 + (z0 + z2)•b + z2•b^2
-                let mut carry = Limb::select(Limb::ZERO, Limb::ONE, z1_neg);
-                (res.0, carry) = res.0.carrying_add(&z0.0, carry);
-                (res.1, carry) = res.1.carrying_add(&z0.1, carry);
-                let mut carry2;
-                (res.1, carry2) = res.1.carrying_add(&z0.0, Limb::ZERO);
-                (res.2, carry) = res.2.carrying_add(&z0.1, carry.wrapping_add(carry2));
-                (res.1, carry2) = res.1.carrying_add(&z2.0, Limb::ZERO);
-                (res.2, carry2) = res.2.carrying_add(&z2.1, carry2);
-                carry = carry.wrapping_add(carry2);
-                (res.2, carry2) = res.2.carrying_add(&z2.0, Limb::ZERO);
-                (res.3, _) = res.3.carrying_add(&z2.1, carry.wrapping_add(carry2));
+                // Calculate z1 = (x0 + x1)(y0 + y1)
+                let (mut l0, mut l1) = (Uint::<$half_size>::ZERO, Uint::<$half_size>::ZERO);
+                let (mut l0c, mut l1c) = (Limb::ZERO, Limb::ZERO);
+                let mut i = 0;
+                while i < $half_size {
+                    (l0.limbs[i], l0c) = x0[i].carrying_add(x1[i], l0c);
+                    (l1.limbs[i], l1c) = y0[i].carrying_add(y1[i], l1c);
+                    i += 1;
+                }
+                let z1 = UintKaratsubaMul::<$half_size>::multiply(&l0.limbs, &l1.limbs);
 
-                (res.0.concat(&res.1), res.2.concat(&res.3))
+                // Middle terms of the result
+                let (mut s0, mut s1) = (z0.1, z2.0);
+                let (mut c, mut carry);
+
+                // Add z1•b
+                (s0, c) = s0.carrying_add(&z1.0, Limb::ZERO);
+                (s1, c) = s1.carrying_add(&z1.1, c);
+                carry = c;
+                // Correct for overflowing terms in z1 by adding (l0c•l1 + l1c•l0)•b^2
+                (s1, c) = s1.carrying_add(&Uint::select(&Uint::ZERO, &l0, l1c.is_nonzero()), Limb::ZERO);
+                carry = carry.wrapping_add(c);
+                (s1, c) = s1.carrying_add(&Uint::select(&Uint::ZERO, &l1, l0c.is_nonzero()), Limb::ZERO);
+                carry = carry.wrapping_add(c);
+                carry = carry.wrapping_add(l0c.bitand(l1c));
+
+                // Subtract (z0 + z2)•b
+                (s0, c) = s0.borrowing_sub(&z0.0, Limb::ZERO);
+                (s1, c) = s1.borrowing_sub(&z0.1, c);
+                carry = carry.wrapping_add(c);
+                (s0, c) = s0.borrowing_sub(&z2.0, Limb::ZERO);
+                (s1, c) = s1.borrowing_sub(&z2.1, c);
+                carry = carry.wrapping_add(c);
+
+                // Handle final carry
+                (z0.0.concat(&s0), s1.concat(&z2.1.overflowing_add_limb(carry).0))
             }
         }
     };
@@ -119,41 +115,19 @@ macro_rules! impl_uint_karatsuba_squaring {
             pub(crate) const fn square(limbs: &[Limb]) -> (Uint<$full_size>, Uint<$full_size>) {
                 let (x0, x1) = limbs.split_at($half_size);
                 let z0 = UintKaratsubaMul::<$half_size>::square(&x0);
+                let mut z1 = UintKaratsubaMul::<$half_size>::multiply(&x0, &x1);
                 let z2 = UintKaratsubaMul::<$half_size>::square(&x1);
 
-                // Calculate z0 + (z0 + z2)•b + z2•b^2
-                let mut res = (z0.0, z0.1, Uint::<$half_size>::ZERO, Uint::<$half_size>::ZERO);
-                let mut carry;
-                (res.1, carry) = res.1.carrying_add(&z0.0, Limb::ZERO);
-                (res.2, carry) = z0.1.carrying_add(&z2.0, carry);
-                let mut carry2;
-                (res.1, carry2) = res.1.carrying_add(&z2.0, Limb::ZERO);
-                (res.2, carry2) = res.2.carrying_add(&z2.1, carry2);
-                (res.3, _) = z2.1.carrying_add(&Uint::ZERO, carry.wrapping_add(carry2));
+                let (mut c, mut carry);
+                // Double z1
+                (z1.0, c) = z1.0.overflowing_shl1();
+                (z1.1, carry) = z1.1.carrying_shl1(c);
+                // Add z0.1, z2.0 to z1
+                (z1.0, c) = z1.0.carrying_add(&z0.1, Limb::ZERO);
+                (z1.1, c) = z1.1.carrying_add(&z2.0, c);
+                carry = carry.wrapping_add(c);
 
-                // Calculate z1 = (x0 - x1)^2
-                let mut l0 = Uint::<$half_size>::ZERO;
-                let mut l0b = Limb::ZERO;
-                let mut i = 0;
-                while i < $half_size {
-                    (l0.limbs[i], l0b) = x0[i].borrowing_sub(x1[i], l0b);
-                    i += 1;
-                }
-                l0 = Uint::select(
-                    &l0,
-                    &l0.wrapping_neg(),
-                    ConstChoice::from_word_mask(l0b.0),
-                );
-
-                let z1 = UintKaratsubaMul::<$half_size>::square(&l0.limbs);
-
-                // Subtract z1•b
-                carry = Limb::ZERO;
-                (res.1, carry) = res.1.borrowing_sub(&z1.0, carry);
-                (res.2, carry) = res.2.borrowing_sub(&z1.1, carry);
-                (res.3, _) = res.3.borrowing_sub(&Uint::ZERO, carry);
-
-                (res.0.concat(&res.1), res.2.concat(&res.3))
+                (z0.0.concat(&z1.0), z1.1.concat(&z2.1.overflowing_add_limb(carry).0))
             }
         }
     };
@@ -387,5 +361,5 @@ fn conditional_wrapping_neg_assign(limbs: &mut [Limb], choice: ConstChoice) {
     }
 }
 
-impl_uint_karatsuba_multiplication!(128, 64, 32, 16, 8);
-impl_uint_karatsuba_squaring!(128, 64, 32);
+impl_uint_karatsuba_multiplication!(128, 64, 32, 16, 8, 4);
+impl_uint_karatsuba_squaring!(128, 64, 32, 16, 8);

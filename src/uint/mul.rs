@@ -61,6 +61,10 @@ impl<const LIMBS: usize> Uint<LIMBS> {
                 let (a, b) = UintKaratsubaMul::<16>::multiply(&self.limbs, &rhs.limbs);
                 return (a.resize(), b.resize());
             }
+            if LIMBS == 8 {
+                let (a, b) = UintKaratsubaMul::<8>::multiply(&self.limbs, &rhs.limbs);
+                return (a.resize(), b.resize());
+            }
         }
 
         uint_mul_limbs(&self.limbs, &rhs.limbs)
@@ -96,6 +100,14 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         }
         if LIMBS == 64 {
             let (a, b) = UintKaratsubaMul::<64>::square(&self.limbs);
+            return (a.resize(), b.resize());
+        }
+        if LIMBS == 32 {
+            let (a, b) = UintKaratsubaMul::<32>::square(&self.limbs);
+            return (a.resize(), b.resize());
+        }
+        if LIMBS == 16 {
+            let (a, b) = UintKaratsubaMul::<16>::square(&self.limbs);
             return (a.resize(), b.resize());
         }
 
