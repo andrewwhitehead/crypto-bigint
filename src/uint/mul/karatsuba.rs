@@ -10,13 +10,17 @@
 //!
 //! This equation is equivalent to a linear combination of three products of size `n/2`, which
 //! may each be reduced by applying the same optimization.
-//! Setting z0 = x0•y0, z1 = (x0-x1)(y1-y0), z2 = x1•y1:
-//!   x•y = z0 + (z0 - z1 + z2)•b + z2•b^2
+//! Setting z0 = x0•y0, z1 = (x0 + x1)(y1 + y0), z2 = x1•y1:
+//!   x•y = z0 + (z1 - z0 - z2)•b + z2•b^2
 //!
 //! Considering each sub-product as a tuple of integers `(lo, hi)`, the product is calculated as
 //! follows (with appropriate carries):
-//!   [z0.0, z0.0 + z0.1 - z1.0 + z2.0, z0.1 - z1.1 + z2.0 + z2.1, z2.1]
+//!   [z0.0, z0.1 + z1.0 - z0.0 - z2.0, z1.1 - z0.1 + z2.0 - z2.1, z2.1]
 //!
+//! Squaring uses a similar optimization, breaking the operation down into two half-size
+//! squarings and a half-size multiplication:
+//!
+//!   x^2 = (x0 + x1•b)^2 = x0^2 + 2x0•x1•b + (x1•b)^2
 
 use super::schoolbook;
 use crate::{Limb, Uint, UintRef};
