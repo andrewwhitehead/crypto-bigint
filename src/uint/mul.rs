@@ -9,8 +9,6 @@ use crate::{
     Wrapping, WrappingMul, Zero,
 };
 
-use self::karatsuba::UintKaratsubaMul;
-
 pub(crate) mod karatsuba;
 pub(crate) mod schoolbook;
 
@@ -43,39 +41,12 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         &self,
         rhs: &Uint<RHS_LIMBS>,
     ) -> (Self, Uint<RHS_LIMBS>) {
-        if LIMBS == RHS_LIMBS {
-            if LIMBS == 128 {
-                let (a, b) = UintKaratsubaMul::<128>::multiply(&self.limbs, &rhs.limbs);
-                // resize() should be a no-op, but the compiler can't infer that Uint<LIMBS> is Uint<128>
-                return (a.resize(), b.resize());
-            }
-            if LIMBS == 64 {
-                let (a, b) = UintKaratsubaMul::<64>::multiply(&self.limbs, &rhs.limbs);
-                return (a.resize(), b.resize());
-            }
-            if LIMBS == 32 {
-                let (a, b) = UintKaratsubaMul::<32>::multiply(&self.limbs, &rhs.limbs);
-                return (a.resize(), b.resize());
-            }
-            if LIMBS == 16 {
-                let (a, b) = UintKaratsubaMul::<16>::multiply(&self.limbs, &rhs.limbs);
-                return (a.resize(), b.resize());
-            }
-        }
-
-        uint_mul_limbs(&self.limbs, &rhs.limbs)
+        karatsuba::uint_widening_mul(self, rhs)
     }
 
     /// Perform wrapping multiplication, discarding overflow.
     pub const fn wrapping_mul<const RHS_LIMBS: usize>(&self, rhs: &Uint<RHS_LIMBS>) -> Self {
-        // A single special case that is faster for now
-        if LIMBS == RHS_LIMBS && LIMBS == 128 {
-            return self.widening_mul(rhs).0;
-        }
-
-        let mut lo = Uint::ZERO;
-        schoolbook::wrapping_mul(&self.limbs, &rhs.limbs, &mut lo.limbs);
-        lo
+        karatsuba::uint_wrapping_mul(self, rhs)
     }
 
     /// Perform saturating multiplication, returning `MAX` on overflow.
@@ -89,17 +60,7 @@ impl<const LIMBS: usize> Uint<LIMBS> {
 impl<const LIMBS: usize> Uint<LIMBS> {
     /// Square self, returning a "wide" result in two parts as (lo, hi).
     pub const fn square_wide(&self) -> (Self, Self) {
-        if LIMBS == 128 {
-            let (a, b) = UintKaratsubaMul::<128>::square(&self.limbs);
-            // resize() should be a no-op, but the compiler can't infer that Uint<LIMBS> is Uint<128>
-            return (a.resize(), b.resize());
-        }
-        if LIMBS == 64 {
-            let (a, b) = UintKaratsubaMul::<64>::square(&self.limbs);
-            return (a.resize(), b.resize());
-        }
-
-        uint_square_limbs(&self.limbs)
+        karatsuba::uint_widening_square(self)
     }
 
     /// Square self, returning a concatenated "wide" result.
@@ -119,9 +80,7 @@ impl<const LIMBS: usize> Uint<LIMBS> {
 
     /// Perform wrapping square, discarding overflow.
     pub const fn wrapping_square(&self) -> Uint<LIMBS> {
-        let mut lo = Uint::ZERO;
-        schoolbook::wrapping_square(&self.limbs, &mut lo.limbs);
-        lo
+        karatsuba::uint_wrapping_square(self)
     }
 
     /// Perform saturating squaring, returning `MAX` on overflow.
@@ -251,30 +210,6 @@ impl<const LIMBS: usize> WrappingMul for Uint<LIMBS> {
     }
 }
 
-/// Helper method to perform schoolbook multiplication
-#[inline]
-pub(crate) const fn uint_mul_limbs<const LIMBS: usize, const RHS_LIMBS: usize>(
-    lhs: &[Limb],
-    rhs: &[Limb],
-) -> (Uint<LIMBS>, Uint<RHS_LIMBS>) {
-    debug_assert!(lhs.len() == LIMBS && rhs.len() == RHS_LIMBS);
-    let mut lo = Uint::<LIMBS>::ZERO;
-    let mut hi = Uint::<RHS_LIMBS>::ZERO;
-    schoolbook::mul_wide(lhs, rhs, &mut lo.limbs, &mut hi.limbs);
-    (lo, hi)
-}
-
-/// Helper method to perform schoolbook multiplication
-#[inline]
-pub(crate) const fn uint_square_limbs<const LIMBS: usize>(
-    limbs: &[Limb],
-) -> (Uint<LIMBS>, Uint<LIMBS>) {
-    let mut lo = Uint::<LIMBS>::ZERO;
-    let mut hi = Uint::<LIMBS>::ZERO;
-    schoolbook::square_wide(limbs, &mut lo.limbs, &mut hi.limbs);
-    (lo, hi)
-}
-
 /// Wrapper function used by `BoxedUint`
 #[cfg(feature = "alloc")]
 pub(crate) fn mul_limbs(lhs: &[Limb], rhs: &[Limb], out: &mut [Limb]) {
@@ -285,8 +220,8 @@ pub(crate) fn mul_limbs(lhs: &[Limb], rhs: &[Limb], out: &mut [Limb]) {
 
 /// Wrapper function used by `BoxedUint`
 #[cfg(feature = "alloc")]
-pub(crate) fn square_limbs(limbs: &[Limb], out: &mut [Limb]) {
-    debug_assert_eq!(limbs.len() * 2, out.len());
+pub(crate) const fn square_limbs(limbs: &[Limb], out: &mut [Limb]) {
+    debug_assert!(limbs.len() * 2 == out.len());
     let (lo, hi) = out.split_at_mut(limbs.len());
     schoolbook::square_wide(limbs, lo, hi);
 }

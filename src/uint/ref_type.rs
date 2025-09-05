@@ -9,6 +9,7 @@ use core::{
 #[cfg(feature = "alloc")]
 use crate::{ConstChoice, Word};
 
+mod add;
 mod bits;
 mod invert_mod;
 mod shl;

@@ -18,374 +18,612 @@
 //!   [z0.0, z0.0 + z0.1 - z1.0 + z2.0, z0.1 - z1.1 + z2.0 + z2.1, z2.1]
 //!
 
-use super::{uint_mul_limbs, uint_square_limbs};
-use crate::{ConstChoice, Limb, Uint};
-
-#[cfg(feature = "alloc")]
 use super::{schoolbook, square_limbs};
-#[cfg(feature = "alloc")]
-use crate::{WideWord, Word};
+use crate::{Limb, Uint, UintRef};
 
-#[cfg(feature = "alloc")]
-pub const KARATSUBA_MIN_STARTING_LIMBS: usize = 32;
-#[cfg(feature = "alloc")]
-pub const KARATSUBA_MAX_REDUCE_LIMBS: usize = 24;
+pub const MIN_STARTING_LIMBS: usize = 16;
+pub const MAX_REDUCE_LIMBS: usize = 12;
 
-/// A helper struct for performing Karatsuba multiplication on Uints.
-pub(crate) struct UintKaratsubaMul<const LIMBS: usize>;
-
-macro_rules! impl_uint_karatsuba_multiplication {
-    // TODO: revisit when `const_mut_refs` is stable
-    (reduce $full_size:expr, $half_size:expr) => {
-        impl UintKaratsubaMul<$full_size> {
-            pub(crate) const fn multiply(
-                lhs: &[Limb],
-                rhs: &[Limb],
-            ) -> (Uint<$full_size>, Uint<$full_size>) {
-                let (x0, x1) = lhs.split_at($half_size);
-                let (y0, y1) = rhs.split_at($half_size);
-
-                // Calculate z1 = (x0 - x1)(y1 - y0)
-                let mut l0 = Uint::<$half_size>::ZERO;
-                let mut l1 = Uint::<$half_size>::ZERO;
-                let mut l0b = Limb::ZERO;
-                let mut l1b = Limb::ZERO;
-                let mut i = 0;
-                while i < $half_size {
-                    (l0.limbs[i], l0b) = x0[i].borrowing_sub(x1[i], l0b);
-                    (l1.limbs[i], l1b) = y1[i].borrowing_sub(y0[i], l1b);
-                    i += 1;
-                }
-                l0 = Uint::select(
-                    &l0,
-                    &l0.wrapping_neg(),
-                    ConstChoice::from_word_mask(l0b.0),
-                );
-                l1 = Uint::select(
-                    &l1,
-                    &l1.wrapping_neg(),
-                    ConstChoice::from_word_mask(l1b.0),
-                );
-                let z1 = UintKaratsubaMul::<$half_size>::multiply(&l0.limbs, &l1.limbs);
-                let z1_neg = ConstChoice::from_word_mask(l0b.0)
-                    .xor(ConstChoice::from_word_mask(l1b.0));
-
-                // Conditionally add or subtract z1•b depending on its sign
-                let mut res = (Uint::ZERO, z1.0, z1.1, Uint::ZERO);
-                res.0 = Uint::select(&res.0, &res.0.not(), z1_neg);
-                res.1 = Uint::select(&res.1, &res.1.not(), z1_neg);
-                res.2 = Uint::select(&res.2, &res.2.not(), z1_neg);
-                res.3 = Uint::select(&res.3, &res.3.not(), z1_neg);
-
-                // Calculate z0 = x0•y0
-                let z0 = UintKaratsubaMul::<$half_size>::multiply(&x0, &y0);
-                // Calculate z2 = x1•y1
-                let z2 = UintKaratsubaMul::<$half_size>::multiply(&x1, &y1);
-
-                // Add z0 + (z0 + z2)•b + z2•b^2
-                let mut carry = Limb::select(Limb::ZERO, Limb::ONE, z1_neg);
-                (res.0, carry) = res.0.carrying_add(&z0.0, carry);
-                (res.1, carry) = res.1.carrying_add(&z0.1, carry);
-                let mut carry2;
-                (res.1, carry2) = res.1.carrying_add(&z0.0, Limb::ZERO);
-                (res.2, carry) = res.2.carrying_add(&z0.1, carry.wrapping_add(carry2));
-                (res.1, carry2) = res.1.carrying_add(&z2.0, Limb::ZERO);
-                (res.2, carry2) = res.2.carrying_add(&z2.1, carry2);
-                carry = carry.wrapping_add(carry2);
-                (res.2, carry2) = res.2.carrying_add(&z2.0, Limb::ZERO);
-                (res.3, _) = res.3.carrying_add(&z2.1, carry.wrapping_add(carry2));
-
-                (res.0.concat(&res.1), res.2.concat(&res.3))
-            }
-        }
-    };
-    ($small_size:expr) => {
-        impl UintKaratsubaMul<$small_size> {
-            #[inline]
-            pub(crate) const fn multiply(lhs: &[Limb], rhs: &[Limb]) -> (Uint<$small_size>, Uint<$small_size>) {
-                uint_mul_limbs(lhs, rhs)
-            }
-        }
-    };
-    ($full_size:tt, $half_size:tt $(,$rest:tt)*) => {
-        impl_uint_karatsuba_multiplication!{reduce $full_size, $half_size}
-        impl_uint_karatsuba_multiplication!{$half_size $(,$rest)*}
+#[inline(always)]
+pub(crate) const fn uint_widening_mul<const LHS: usize, const RHS: usize>(
+    lhs: &Uint<LHS>,
+    rhs: &Uint<RHS>,
+) -> (Uint<LHS>, Uint<RHS>) {
+    if LHS < MIN_STARTING_LIMBS || RHS < MIN_STARTING_LIMBS {
+        let (mut lo, mut hi) = (Uint::<LHS>::ZERO, Uint::<RHS>::ZERO);
+        schoolbook::mul_wide(
+            lhs.as_limbs(),
+            rhs.as_limbs(),
+            lo.as_mut_limbs(),
+            hi.as_mut_limbs(),
+        );
+        return (lo, hi);
     }
-}
 
-macro_rules! impl_uint_karatsuba_squaring {
-    (reduce $full_size:expr, $half_size:expr) => {
-        impl UintKaratsubaMul<$full_size> {
-            pub(crate) const fn square(limbs: &[Limb]) -> (Uint<$full_size>, Uint<$full_size>) {
-                let (x0, x1) = limbs.split_at($half_size);
-                let z0 = UintKaratsubaMul::<$half_size>::square(&x0);
-                let z2 = UintKaratsubaMul::<$half_size>::square(&x1);
-
-                // Calculate z0 + (z0 + z2)•b + z2•b^2
-                let mut res = (z0.0, z0.1, Uint::<$half_size>::ZERO, Uint::<$half_size>::ZERO);
-                let mut carry;
-                (res.1, carry) = res.1.carrying_add(&z0.0, Limb::ZERO);
-                (res.2, carry) = z0.1.carrying_add(&z2.0, carry);
-                let mut carry2;
-                (res.1, carry2) = res.1.carrying_add(&z2.0, Limb::ZERO);
-                (res.2, carry2) = res.2.carrying_add(&z2.1, carry2);
-                (res.3, _) = z2.1.carrying_add(&Uint::ZERO, carry.wrapping_add(carry2));
-
-                // Calculate z1 = (x0 - x1)^2
-                let mut l0 = Uint::<$half_size>::ZERO;
-                let mut l0b = Limb::ZERO;
-                let mut i = 0;
-                while i < $half_size {
-                    (l0.limbs[i], l0b) = x0[i].borrowing_sub(x1[i], l0b);
-                    i += 1;
-                }
-                l0 = Uint::select(
-                    &l0,
-                    &l0.wrapping_neg(),
-                    ConstChoice::from_word_mask(l0b.0),
-                );
-
-                let z1 = UintKaratsubaMul::<$half_size>::square(&l0.limbs);
-
-                // Subtract z1•b
-                carry = Limb::ZERO;
-                (res.1, carry) = res.1.borrowing_sub(&z1.0, carry);
-                (res.2, carry) = res.2.borrowing_sub(&z1.1, carry);
-                (res.3, _) = res.3.borrowing_sub(&Uint::ZERO, carry);
-
-                (res.0.concat(&res.1), res.2.concat(&res.3))
-            }
-        }
-    };
-    ($small_size:expr) => {
-        impl UintKaratsubaMul<$small_size> {
-            #[inline]
-            pub(crate) const fn square(limbs: &[Limb]) -> (Uint<$small_size>, Uint<$small_size>) {
-                uint_square_limbs(limbs)
-            }
-        }
-    };
-    ($full_size:tt, $half_size:tt $(,$rest:tt)*) => {
-        impl_uint_karatsuba_squaring!{reduce $full_size, $half_size}
-        impl_uint_karatsuba_squaring!{$half_size $(,$rest)*}
-    }
-}
-
-#[cfg(feature = "alloc")]
-#[inline(never)]
-pub(crate) fn karatsuba_mul_limbs(
-    lhs: &[Limb],
-    rhs: &[Limb],
-    out: &mut [Limb],
-    scratch: &mut [Limb],
-) {
     let size = {
-        let overlap = lhs.len().min(rhs.len());
-        if (overlap & 1) == 1 {
-            overlap.saturating_sub(1)
-        } else {
-            overlap
-        }
+        let overlap = if LHS < RHS { LHS } else { RHS };
+        overlap - (overlap & 1)
     };
-    if size <= KARATSUBA_MAX_REDUCE_LIMBS {
-        out.fill(Limb::ZERO);
-        schoolbook::carrying_add_mul(lhs, rhs, out);
-        return;
-    }
-    if lhs.len() + rhs.len() != out.len() || scratch.len() < 2 * size {
-        panic!("invalid arguments to karatsuba_mul_limbs");
-    }
     let half = size / 2;
-    let (scratch, ext_scratch) = scratch.split_at_mut(size);
 
-    let (x, xt) = lhs.split_at(size);
-    let (y, yt) = rhs.split_at(size);
-    let (x0, x1) = x.split_at(half);
-    let (y0, y1) = y.split_at(half);
+    let (x, x_tail) = lhs.as_limbs().split_at(size);
+    let (y, y_tail) = rhs.as_limbs().split_at(size);
+    let (x0, x1) = UintRef::new(x).split_at(half);
+    let (y0, y1) = UintRef::new(y).split_at(half);
 
-    // Initialize output buffer
-    out.fill(Limb::ZERO);
-
-    // Calculate abs(x0 - x1) and abs(y1 - y0)
-    let mut i = 0;
-    let mut borrow0 = Limb::ZERO;
-    let mut borrow1 = Limb::ZERO;
-    while i < half {
-        (scratch[i], borrow0) = x0[i].borrowing_sub(x1[i], borrow0);
-        (scratch[i + half], borrow1) = y1[i].borrowing_sub(y0[i], borrow1);
-        i += 1;
-    }
-    // Conditionally negate terms depending whether they borrowed
-    conditional_wrapping_neg_assign(&mut scratch[..half], ConstChoice::from_word_mask(borrow0.0));
-    conditional_wrapping_neg_assign(
-        &mut scratch[half..size],
-        ConstChoice::from_word_mask(borrow1.0),
+    let (mut lo, mut mid, mut hi) = (Uint::<LHS>::ZERO, Uint::<LHS>::ZERO, Uint::<RHS>::ZERO);
+    let ((lo_mut, lo_tail), mid_mut, hi_mut) = (
+        lo.as_mut_uint_ref().split_at_mut(size),
+        mid.as_mut_uint_ref().leading_mut(size),
+        hi.as_mut_uint_ref().leading_mut(size),
     );
+    let mut scratch = (Uint::<LHS>::ZERO, Uint::<LHS>::ZERO);
+    let scratch = (scratch.0.as_mut_uint_ref(), scratch.1.as_mut_uint_ref());
 
-    // Calculate abs(z1) = abs(x0 - x1)•abs(y1 - y0)
-    karatsuba_mul_limbs(
-        &scratch[..half],
-        &scratch[half..size],
-        &mut out[half..size + half],
-        ext_scratch,
+    // Calculate z0 = x0•y0 into lo
+    widening_mul(x0.as_slice(), y0.as_slice(), lo_mut, (scratch.0, scratch.1));
+
+    // Calculate z2 = x1•y1 into hi
+    widening_mul(x1.as_slice(), y1.as_slice(), hi_mut, (scratch.0, scratch.1));
+
+    // Calculate z1 into mid
+    let mut carry_b3 = compute_z1((x0, x1), (y0, y1), mid_mut, scratch);
+
+    // Subtract z0+z2 from mid
+    let mut c = mid_mut.borrowing_sub_assign(lo_mut, Limb::ZERO);
+    carry_b3 = carry_b3.wrapping_add(c);
+    c = mid_mut.borrowing_sub_assign(hi_mut, Limb::ZERO);
+    carry_b3 = carry_b3.wrapping_add(c);
+
+    combine_overlapping(lo_mut, mid_mut, hi_mut, half, carry_b3);
+
+    if LHS > RHS || LHS & 1 == 1 {
+        // Need to shift hi backward into lo
+
+        // Handle trailing limbs
+        // if !x_tail.is_empty() {
+        //     carrying_add_mul_limbs(x_tail, rhs, out.trailing_mut(size).as_mut());
+        // }
+        // if !y_tail.is_empty() {
+        //     let (assign, tail) = out.trailing_mut(size).split_at_mut(size + y_tail.len());
+        //     let carry = carrying_add_mul_limbs(y_tail, x, assign.as_mut());
+        //     tail.add_assign_limb(carry);
+        // }
+    }
+
+    (lo, hi)
+}
+
+#[inline(always)]
+pub(crate) const fn uint_wrapping_mul<const LHS: usize, const RHS: usize>(
+    lhs: &Uint<LHS>,
+    rhs: &Uint<RHS>,
+) -> Uint<LHS> {
+    if LHS < MIN_STARTING_LIMBS || RHS < MIN_STARTING_LIMBS {
+        let mut lo = Uint::<LHS>::ZERO;
+        schoolbook::wrapping_mul(lhs.as_limbs(), rhs.as_limbs(), lo.as_mut_limbs());
+        return lo;
+    }
+
+    let mut out = Uint::ZERO;
+    let mut scratch = (Uint::<LHS>::ZERO, Uint::<LHS>::ZERO);
+    if LHS == RHS && LHS & 1 == 0 {
+        wrapping_mul_even(
+            lhs.as_limbs(),
+            rhs.as_limbs(),
+            out.as_mut_uint_ref(),
+            (scratch.0.as_mut_uint_ref(), scratch.1.as_mut_uint_ref()),
+        );
+    } else {
+        wrapping_mul(
+            lhs.as_limbs(),
+            rhs.as_limbs(),
+            out.as_mut_uint_ref(),
+            (scratch.0.as_mut_uint_ref(), scratch.1.as_mut_uint_ref()),
+        );
+    }
+    out
+}
+
+#[inline(always)]
+pub(crate) const fn uint_widening_square<const LIMBS: usize>(
+    uint: &Uint<LIMBS>,
+) -> (Uint<LIMBS>, Uint<LIMBS>) {
+    if LIMBS < MIN_STARTING_LIMBS * 2 {
+        let (mut lo, mut hi) = (Uint::<LIMBS>::ZERO, Uint::<LIMBS>::ZERO);
+        schoolbook::square_wide(uint.as_limbs(), lo.as_mut_limbs(), hi.as_mut_limbs());
+        return (lo, hi);
+    }
+
+    let size = LIMBS - (LIMBS & 1);
+    let half = size / 2;
+
+    let (x, x_tail) = uint.as_limbs().split_at(size);
+    let (x0, x1) = UintRef::new(x).split_at(half);
+
+    let (mut lo, mut mid, mut hi) = (
+        Uint::<LIMBS>::ZERO,
+        Uint::<LIMBS>::ZERO,
+        Uint::<LIMBS>::ZERO,
     );
-    let z1_neg = ConstChoice::from_word_mask(borrow0.0).xor(ConstChoice::from_word_mask(borrow1.0));
-    // Conditionally negate the output
-    conditional_wrapping_neg_assign(&mut out[..2 * size], z1_neg);
+    let ((lo_mut, lo_tail), mid_mut, hi_mut) = (
+        lo.as_mut_uint_ref().split_at_mut(size),
+        mid.as_mut_uint_ref().leading_mut(size),
+        hi.as_mut_uint_ref().leading_mut(size),
+    );
+    let mut scratch = (Uint::<LIMBS>::ZERO, Uint::<LIMBS>::ZERO);
+    let scratch = (scratch.0.as_mut_uint_ref(), scratch.1.as_mut_uint_ref());
 
-    // Calculate z0 = x0•y0 into scratch
-    karatsuba_mul_limbs(x0, y0, scratch, ext_scratch);
-    // Add z0•(1 + b) to output
-    let mut carry = Limb::ZERO;
-    let mut carry2 = Limb::ZERO;
-    i = 0;
-    while i < size {
-        (out[i], carry) = out[i].carrying_add(scratch[i], carry); // add z0
-        i += 1;
-    }
-    i = 0;
-    while i < half {
-        (out[i + half], carry2) = out[i + half].carrying_add(scratch[i], carry2); // add z0.0
-        i += 1;
-    }
-    carry = carry.wrapping_add(carry2);
-    while i < size {
-        (out[i + half], carry) = out[i + half].carrying_add(scratch[i], carry); // add z0.1
-        i += 1;
-    }
+    // Calculate z0 = x0^2 into lo
+    widening_square(x0.as_slice(), lo_mut, (scratch.0, scratch.1));
 
-    // Calculate z2 = x1•y1 into scratch
-    karatsuba_mul_limbs(x1, y1, scratch, ext_scratch);
-    // Add z2•(b + b^2) to output
-    carry2 = Limb::ZERO;
-    i = 0;
-    while i < size {
-        (out[i + half], carry2) = out[i + half].carrying_add(scratch[i], carry2); // add z2
-        i += 1;
-    }
-    carry = carry.wrapping_add(carry2);
-    carry2 = Limb::ZERO;
-    i = 0;
-    while i < half {
-        (out[i + size], carry2) = out[i + size].carrying_add(scratch[i], carry2); // add z2.0
-        i += 1;
-    }
-    carry = carry.wrapping_add(carry2);
-    while i < size {
-        (out[i + size], carry) = out[i + size].carrying_add(scratch[i], carry); // add z2.1
-        i += 1;
-    }
+    // Calculate z2 = x1^2 into hi
+    widening_square(x1.as_slice(), hi_mut, (scratch.0, scratch.1));
+
+    // Calculate z1 = x0•x1 into mid
+    widening_mul(x0.as_slice(), x1.as_slice(), mid_mut, scratch);
+    let carry_b3 = Limb::select(Limb::ZERO, Limb::ONE, mid_mut.shl1_assign());
+
+    combine_overlapping(lo_mut, mid_mut, hi_mut, half, carry_b3);
+
+    // if LHS > RHS || LHS & 1 == 1 {
+    // Need to shift hi backward into lo
 
     // Handle trailing limbs
-    if !xt.is_empty() {
-        schoolbook::carrying_add_mul(xt, rhs, &mut out[size..]);
-    }
-    if !yt.is_empty() {
-        let end_pos = 2 * size + yt.len();
-        carry = schoolbook::carrying_add_mul(yt, x, &mut out[size..end_pos]);
-        i = end_pos;
-        while i < out.len() {
-            (out[i], carry) = out[i].carrying_add(Limb::ZERO, carry);
-            i += 1;
-        }
-    }
+    // if !x_tail.is_empty() {
+    //     carrying_add_mul_limbs(x_tail, rhs, out.trailing_mut(size).as_mut());
+    // }
+    // if !y_tail.is_empty() {
+    //     let (assign, tail) = out.trailing_mut(size).split_at_mut(size + y_tail.len());
+    //     let carry = carrying_add_mul_limbs(y_tail, x, assign.as_mut());
+    //     tail.add_assign_limb(carry);
+    // }
+    // }
+
+    (lo, hi)
 }
 
-#[cfg(feature = "alloc")]
+#[inline(always)]
+pub(crate) const fn uint_wrapping_square<const LIMBS: usize>(uint: &Uint<LIMBS>) -> Uint<LIMBS> {
+    if LIMBS < MIN_STARTING_LIMBS * 4 {
+        let mut lo = Uint::<LIMBS>::ZERO;
+        schoolbook::wrapping_square(uint.as_limbs(), lo.as_mut_limbs());
+        return lo;
+    }
+
+    let size = LIMBS - (LIMBS & 1);
+    let half = size / 2;
+
+    let (x, x_tail) = uint.as_limbs().split_at(size);
+    let (x0, x1) = UintRef::new(x).split_at(half);
+
+    let (mut lo, mut mid, mut hi) = (
+        Uint::<LIMBS>::ZERO,
+        Uint::<LIMBS>::ZERO,
+        Uint::<LIMBS>::ZERO,
+    );
+    let ((lo_mut, lo_tail), mid_mut, hi_mut) = (
+        lo.as_mut_uint_ref().split_at_mut(size),
+        mid.as_mut_uint_ref().leading_mut(size),
+        hi.as_mut_uint_ref().leading_mut(size),
+    );
+    let mut scratch = (Uint::<LIMBS>::ZERO, Uint::<LIMBS>::ZERO);
+    let scratch = (scratch.0.as_mut_uint_ref(), scratch.1.as_mut_uint_ref());
+
+    // Calculate z0 = x0^2 into lo
+    widening_square(x0.as_slice(), lo_mut, (scratch.0, scratch.1));
+
+    // Calculate z2 = x1^2 into hi
+    widening_square(x1.as_slice(), hi_mut, (scratch.0, scratch.1));
+
+    // Calculate z1 = x0•x1 into mid
+    widening_mul(x0.as_slice(), x1.as_slice(), mid_mut, scratch);
+    let carry_b3 = Limb::select(Limb::ZERO, Limb::ONE, mid_mut.shl1_assign());
+
+    combine_overlapping(lo_mut, mid_mut, hi_mut, half, carry_b3);
+
+    // if LHS > RHS || LHS & 1 == 1 {
+    // Need to shift hi backward into lo
+
+    // Handle trailing limbs
+    // if !x_tail.is_empty() {
+    //     carrying_add_mul_limbs(x_tail, rhs, out.trailing_mut(size).as_mut());
+    // }
+    // if !y_tail.is_empty() {
+    //     let (assign, tail) = out.trailing_mut(size).split_at_mut(size + y_tail.len());
+    //     let carry = carrying_add_mul_limbs(y_tail, x, assign.as_mut());
+    //     tail.add_assign_limb(carry);
+    // }
+    // }
+
+    lo
+}
+
+#[inline(always)]
+const fn combine_overlapping(
+    lo: &mut UintRef,
+    mid: &UintRef,
+    hi: &mut UintRef,
+    half_size: usize,
+    mut carry_b3: Limb,
+) {
+    // Add mid.0•b into lo
+    let mut c = lo
+        .trailing_mut(half_size)
+        .carrying_add_assign(mid.leading(half_size), Limb::ZERO);
+
+    // Add mid.1•b^2 into hi
+    c = hi
+        .leading_mut(half_size)
+        .carrying_add_assign(mid.trailing(half_size), c);
+    carry_b3 = carry_b3.wrapping_add(c);
+
+    hi.trailing_mut(half_size).add_assign_limb(carry_b3);
+}
+
+/// Multiply two limb slices, placing the result in `out`.
+///
+/// `lhs` and `rhs` may have different lengths.
+/// `out` is assumed to be zeroed.
 #[inline(never)]
-pub(crate) fn karatsuba_square_limbs(limbs: &[Limb], out: &mut [Limb], scratch: &mut [Limb]) {
-    let size = limbs.len();
-    if size <= KARATSUBA_MAX_REDUCE_LIMBS * 2 || (size & 1) == 1 {
-        out.fill(Limb::ZERO);
-        square_limbs(limbs, out);
+#[track_caller]
+pub const fn widening_mul(
+    lhs: &[Limb],
+    rhs: &[Limb],
+    out: &mut UintRef,
+    scratch: (&mut UintRef, &mut UintRef),
+) {
+    assert!(
+        lhs.len() + rhs.len() == out.len(),
+        "invalid arguments to widening_mul"
+    );
+    let size = {
+        let overlap = if lhs.len() < rhs.len() {
+            lhs.len()
+        } else {
+            rhs.len()
+        };
+        overlap - (overlap & 1)
+    };
+    if size <= MAX_REDUCE_LIMBS {
+        schoolbook::carrying_add_mul(lhs, rhs, out.as_mut_slice(), Limb::ZERO);
         return;
     }
-    if 2 * size != out.len() || scratch.len() < out.len() {
-        panic!("invalid arguments to karatsuba_square_limbs");
+    let (x, x_tail) = lhs.split_at(size);
+    let (y, y_tail) = rhs.split_at(size);
+
+    // Multiply the maximal number of matched limbs
+    widening_mul_even(x, y, out.leading_mut(2 * size), scratch);
+
+    // Handle trailing limbs
+    if !x_tail.is_empty() {
+        schoolbook::carrying_add_mul(
+            x_tail,
+            rhs,
+            out.trailing_mut(size).as_mut_slice(),
+            Limb::ZERO,
+        );
     }
+    if !y_tail.is_empty() {
+        let (assign, tail) = out.trailing_mut(size).split_at_mut(size + y_tail.len());
+        let carry = schoolbook::carrying_add_mul(y_tail, x, assign.as_mut_slice(), Limb::ZERO);
+        tail.add_assign_limb(carry);
+    }
+}
+
+/// Multiply two limb slices, placing the result in `out`.
+///
+/// `lhs` and `rhs` must have the same length and an even number of limbs.
+/// `out` is assumed to be zeroed.
+pub const fn widening_mul_even(
+    lhs: &[Limb],
+    rhs: &[Limb],
+    out: &mut UintRef,
+    scratch: (&mut UintRef, &mut UintRef),
+) {
+    let size = lhs.len();
+    assert!(
+        size & 1 == 0
+            && rhs.len() == size
+            && out.len() == size * 2
+            && scratch.0.len() >= size
+            && scratch.1.len() >= size,
+        "invalid arguments to widening_mul_even"
+    );
     let half = size / 2;
-    let (scratch, ext_scratch) = scratch.split_at_mut(size);
+
+    let (x0, x1) = UintRef::new(lhs).split_at(half);
+    let (y0, y1) = UintRef::new(rhs).split_at(half);
+
+    // Calculate z1 = (x0+x1)•(y0+y1) into the middle half of output
+    let mut carry_b3 = compute_z1(
+        (x0, x1),
+        (y0, y1),
+        out.range_mut(half..size + half),
+        (scratch.0, scratch.1),
+    );
+
+    // Calculate z0 = x0•y0 into scratch
+    let z0 = scratch.0.leading_mut(size);
+    z0.fill(Limb::ZERO);
+    widening_mul(
+        x0.as_slice(),
+        y0.as_slice(),
+        z0,
+        scratch.1.split_at_mut(half),
+    );
+
+    // Add z0 to output
+    // FIXME copy first half?
+    let carry_b2 = out.leading_mut(size).carrying_add_assign(z0, Limb::ZERO);
+
+    // Subtract z0•b from the output
+    let mut c = out
+        .range_mut(half..size + half)
+        .borrowing_sub_assign(z0, Limb::ZERO);
+    carry_b3 = carry_b3.wrapping_add(c);
+
+    // Calculate z2 = x1•y1 into scratch
+    let z2 = scratch.0.leading_mut(size);
+    z2.fill(Limb::ZERO);
+    widening_mul(
+        x1.as_slice(),
+        y1.as_slice(),
+        z2,
+        scratch.1.split_at_mut(half),
+    );
+
+    // Subtract z2•b from the output
+    c = out
+        .range_mut(half..size + half)
+        .borrowing_sub_assign(z2, Limb::ZERO);
+    carry_b3 = carry_b3.wrapping_add(c);
+
+    // Add z2.0•b^2 to the output
+    c = out
+        .range_mut(size..size + half)
+        .carrying_add_assign(z2.leading(half), carry_b2);
+    carry_b3 = carry_b3.wrapping_add(c);
+
+    // Add z2.1•b^3 to the output and complete the carries
+    out.trailing_mut(size + half)
+        .carrying_add_assign(z2.trailing(half), carry_b3);
+}
+
+/// A helper function to compute `z1 = (x0+x1)(y0+y1)`
+#[inline]
+const fn compute_z1(
+    (x0, x1): (&UintRef, &UintRef),
+    (y0, y1): (&UintRef, &UintRef),
+    out: &mut UintRef,
+    scratch: (&mut UintRef, &mut UintRef),
+) -> Limb {
+    let half = out.len() / 2;
+    let (s0, s1) = scratch.0.leading_mut(out.len()).split_at_mut(half);
+
+    // Compute s0 = (x0 + x1) + s0c•b
+    s0.copy_from(x0);
+    let s0c = s0.carrying_add_assign(x1, Limb::ZERO);
+
+    // Compute s1 = (y0 + y1) + s1c•b
+    s1.copy_from(y0);
+    let s1c = s1.carrying_add_assign(y1, Limb::ZERO);
+
+    // Compute z1 = (x0 + x1)(y0 + y1), except for the high bit of each sum
+    widening_mul(
+        s0.as_slice(),
+        s1.as_slice(),
+        out,
+        scratch.1.split_at_mut(half),
+    );
+
+    // Correct for missing high bits in multiplication
+    // Add (s0•s1c)b to output
+    let mut carry =
+        out.trailing_mut(half)
+            .conditional_carrying_add_assign(s0, Limb::ZERO, s1c.is_nonzero());
+    // Add (s1•s0c)b to output
+    let c =
+        out.trailing_mut(half)
+            .conditional_carrying_add_assign(s1, Limb::ZERO, s0c.is_nonzero());
+    carry = carry.wrapping_add(c);
+
+    // Add (s0c•s1c•b^3) to output, which will be addressed by the carry
+    carry.wrapping_add(s0c.bitand(s1c))
+}
+
+/// Multiply two limb slices, computing only the lower limbs of the product, placing the result in `out`.
+///
+/// `lhs` and `rhs` may have different lengths.
+/// `out` is assumed to be zeroed.
+#[inline(never)]
+pub const fn wrapping_mul(
+    lhs: &[Limb],
+    rhs: &[Limb],
+    out: &mut UintRef,
+    scratch: (&mut UintRef, &mut UintRef),
+) {
+    assert!(lhs.len() == out.len(), "invalid arguments to wrapping_mul");
+    let size = {
+        let overlap = if lhs.len() < rhs.len() {
+            lhs.len()
+        } else {
+            rhs.len()
+        };
+        overlap - (overlap & 1)
+    };
+    if size <= MAX_REDUCE_LIMBS * 2 {
+        schoolbook::wrapping_mul(lhs, rhs, out.as_mut_slice());
+        return;
+    }
+    let (x_head, x) = lhs.split_at(lhs.len() - size);
+    let rhs = if rhs.len() > lhs.len() {
+        rhs.split_at(lhs.len()).0
+    } else {
+        rhs
+    };
+    let y = rhs.split_at(rhs.len() - size).1;
+
+    // Multiply the maximal number of matched limbs
+    wrapping_mul_even(x, y, out.trailing_mut(out.len() - size), scratch);
+
+    if !x_head.is_empty() {
+        let end_pos = x_head.len() + y.len();
+        let carry = schoolbook::carrying_add_mul(
+            x_head,
+            y,
+            out.leading_mut(end_pos).as_mut_slice(),
+            Limb::ZERO,
+        );
+        out.trailing_mut(end_pos).add_assign_limb(carry);
+    }
+}
+
+/// Multiply two limb slices, placing only the lower limbs of the result in `out`.
+///
+/// `lhs` and `rhs` must have the same length and an even number of limbs.
+/// `out` is assumed to be zeroed.
+#[inline(always)]
+pub const fn wrapping_mul_even(
+    lhs: &[Limb],
+    rhs: &[Limb],
+    out: &mut UintRef,
+    scratch: (&mut UintRef, &mut UintRef),
+) {
+    let size = lhs.len();
+    assert!(
+        size & 1 == 0
+            && rhs.len() == size
+            && out.len() == size
+            && scratch.0.len() >= size
+            && scratch.1.len() >= size,
+        "invalid arguments to wrapping_mul_even"
+    );
+
+    let half = size / 2;
+    let even = half & 1 == 0;
+    let (x0, x1) = UintRef::new(lhs).split_at(half);
+    let (y0, y1) = UintRef::new(rhs).split_at(half);
+    let (s0, s1) = scratch.0.split_at_mut(half);
+
+    // Compute s0 = (x0 + x1) % b
+    s0.copy_from(x0);
+    s0.carrying_add_assign(x1, Limb::ZERO);
+
+    // Compute s1 = (y0 + y1) % b
+    s1.copy_from(y0);
+    s1.carrying_add_assign(y1, Limb::ZERO);
+
+    // Compute z1 = (x0 + x1)(y0 + y1) into the second half of the output
+    wrapping_mul(
+        s0.as_slice(),
+        s1.as_slice(),
+        out.trailing_mut(half),
+        scratch.1.split_at_mut(half),
+    );
+
+    // Calculate z0 = x0•y0 into scratch
+    let z0 = scratch.0.leading_mut(size);
+    z0.fill(Limb::ZERO);
+    widening_mul(
+        x0.as_slice(),
+        y0.as_slice(),
+        z0,
+        scratch.1.split_at_mut(half),
+    );
+
+    // Add z0•(1 - b) to output
+    out.carrying_add_assign(z0, Limb::ZERO);
+    out.trailing_mut(half)
+        .borrowing_sub_assign(z0.leading(half), Limb::ZERO);
+
+    // Calculate z2 = x1•y1 into first half of scratch
+    let z2 = scratch.0.leading_mut(half);
+    z2.fill(Limb::ZERO);
+    wrapping_mul(
+        x1.as_slice(),
+        y1.as_slice(),
+        z2,
+        scratch.1.split_at_mut(half),
+    );
+
+    // Subtract z2•b from output
+    out.trailing_mut(half).borrowing_sub_assign(z2, Limb::ZERO);
+}
+
+#[inline(never)]
+pub(crate) const fn widening_square(
+    limbs: &[Limb],
+    out: &mut UintRef,
+    scratch: (&mut UintRef, &mut UintRef),
+) {
+    let size = limbs.len();
+    assert!(
+        out.len() == 2 * size && scratch.0.len() >= size && scratch.1.len() >= size,
+        "invalid arguments to widening_square"
+    );
+    if size <= MAX_REDUCE_LIMBS * 2 || (size & 1) == 1 {
+        square_limbs(limbs, out.as_mut_slice());
+        return;
+    }
+
+    let half = size / 2;
     let (x0, x1) = limbs.split_at(half);
 
-    // Initialize output buffer
-    out[..2 * size].fill(Limb::ZERO);
+    // Calculate z0 = x0^2 into first half of output
+    widening_square(x0, out.leading_mut(size), (scratch.0, scratch.1));
 
-    // Calculate x0 - x1
-    let mut i = 0;
-    let mut borrow = Limb::ZERO;
-    while i < half {
-        (scratch[i], borrow) = x0[i].borrowing_sub(x1[i], borrow);
-        i += 1;
-    }
-    // Conditionally negate depending whether subtraction borrowed
-    conditional_wrapping_neg_assign(&mut scratch[..half], ConstChoice::from_word_mask(borrow.0));
-    // Calculate z1 = (x0 - x1)^2 into output
-    karatsuba_square_limbs(&scratch[..half], &mut out[half..3 * half], ext_scratch);
-    // Negate the output (will add 1 to produce the wrapping negative)
-    i = 0;
-    while i < 2 * size {
-        out[i] = !out[i];
-        i += 1;
-    }
+    // Calculate z2 = x1^2 into second half of output (z2•b^2)
+    widening_square(x1, out.trailing_mut(size), (scratch.0, scratch.1));
 
-    // Calculate z0 = x0^2 into scratch
-    karatsuba_square_limbs(x0, scratch, ext_scratch);
-    // Add z0•(1 + b) to output
-    let mut carry = Limb::ONE; // add 1 to complete wrapping negative
-    let mut carry2 = Limb::ZERO;
-    i = 0;
-    while i < size {
-        (out[i], carry) = out[i].carrying_add(scratch[i], carry); // add z0
-        i += 1;
-    }
-    i = 0;
-    while i < half {
-        (out[i + half], carry2) = out[i + half].carrying_add(scratch[i], carry2); // add z0.0
-        i += 1;
-    }
-    carry = carry.wrapping_add(carry2);
-    while i < size {
-        (out[i + half], carry) = out[i + half].carrying_add(scratch[i], carry); // add z0.1
-        i += 1;
-    }
+    // Calculate z1 = x0•x1 into scratch
+    let z1 = scratch.0.leading_mut(size);
+    z1.fill(Limb::ZERO);
+    widening_mul(x0, x1, z1, scratch.1.split_at_mut(half));
 
-    // Calculate z2 = x1^2 into scratch
-    karatsuba_square_limbs(x1, scratch, ext_scratch);
-    // Add z2•(b + b^2) to output
-    carry2 = Limb::ZERO;
-    i = 0;
-    while i < size {
-        (out[i + half], carry2) = out[i + half].carrying_add(scratch[i], carry2); // add z2
-        i += 1;
-    }
-    carry = carry.wrapping_add(carry2);
-    carry2 = Limb::ZERO;
-    i = 0;
-    while i < half {
-        (out[i + size], carry2) = out[i + size].carrying_add(scratch[i], carry2); // add z2.0
-        i += 1;
-    }
-    carry = carry.wrapping_add(carry2);
-    while i < size {
-        (out[i + size], carry) = out[i + size].carrying_add(scratch[i], carry); // add z2.1
-        i += 1;
-    }
+    // Multiply z1 by 2
+    let carry1 = z1.shl1_assign();
+
+    // Add 2z1•b to the output
+    let carry2 = out
+        .range_mut(half..size + half)
+        .carrying_add_assign(z1, Limb::ZERO);
+
+    // Apply the carries
+    out.trailing_mut(size + half)
+        .add_assign_limb(Limb::select(Limb::ZERO, Limb::ONE, carry1).wrapping_add(carry2));
 }
 
-#[cfg(feature = "alloc")]
-/// Conditionally replace the contents of a mutable limb slice with its wrapping negation.
-#[inline]
-fn conditional_wrapping_neg_assign(limbs: &mut [Limb], choice: ConstChoice) {
-    let mut carry = choice.select_word(0, 1) as WideWord;
-    let mut r;
-    let mut i = 0;
-    while i < limbs.len() {
-        r = (choice.select_word(limbs[i].0, !limbs[i].0) as WideWord) + carry;
-        limbs[i].0 = r as Word;
-        carry = r >> Word::BITS;
-        i += 1;
+#[inline(never)]
+pub(crate) fn wrapping_square(
+    limbs: &[Limb],
+    out: &mut UintRef,
+    scratch: (&mut UintRef, &mut UintRef),
+) {
+    let size = limbs.len();
+    assert!(
+        out.len() == size && scratch.0.len() >= size && scratch.1.len() >= size,
+        "invalid arguments to wrapping_square"
+    );
+    if size <= MAX_REDUCE_LIMBS * 2 || (size & 1) == 1 {
+        schoolbook::wrapping_square(limbs, out.as_mut_slice());
+        return;
     }
-}
 
-impl_uint_karatsuba_multiplication!(128, 64, 32, 16, 8);
-impl_uint_karatsuba_squaring!(128, 64, 32);
+    let half = size / 2;
+    let (x0, x1) = limbs.split_at(half);
+
+    // Calculate z0 = x0^2 into the output
+    widening_square(x0, out, (scratch.0, scratch.1));
+
+    // Calculate z1 = x0•x1 into scratch
+    let z1 = scratch.0.leading_mut(half);
+    z1.fill(Limb::ZERO);
+    wrapping_mul(x0, x1, z1, scratch.1.split_at_mut(half));
+
+    // Multiply z1 by 2
+    z1.shl1_assign();
+
+    // Add 2z1•b to the output
+    out.trailing_mut(half).carrying_add_assign(z1, Limb::ZERO);
+}

@@ -41,16 +41,19 @@ pub const fn mul_wide(lhs: &[Limb], rhs: &[Limb], lo: &mut [Limb], hi: &mut [Lim
 }
 
 /// Add the schoolbook product of two limb slices to a limb slice, returning the carry.
-#[cfg(feature = "alloc")]
 #[inline]
 #[track_caller]
-pub const fn carrying_add_mul(lhs: &[Limb], rhs: &[Limb], out: &mut [Limb]) -> Limb {
+pub const fn carrying_add_mul(
+    lhs: &[Limb],
+    rhs: &[Limb],
+    out: &mut [Limb],
+    mut carry: Limb,
+) -> Limb {
     assert!(
         lhs.len() + rhs.len() == out.len(),
         "carrying_add_mul length mismatch"
     );
 
-    let mut carry = Limb::ZERO;
     let mut i = 0;
 
     while i < lhs.len() {

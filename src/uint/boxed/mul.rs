@@ -1,9 +1,10 @@
 //! [`BoxedUint`] multiplication operations.
 
 use crate::{
-    BoxedUint, CheckedMul, ConcatenatingMul, Limb, Uint, Wrapping, WrappingMul, Zero,
+    BoxedUint, CheckedMul, ConcatenatingMul, Limb, Uint, UintRef, Wrapping, WrappingMul, Zero,
+    mul::karatsuba::{wrapping_mul, wrapping_square},
     uint::mul::{
-        karatsuba::{KARATSUBA_MIN_STARTING_LIMBS, karatsuba_mul_limbs, karatsuba_square_limbs},
+        karatsuba::{MIN_STARTING_LIMBS, widening_mul, widening_square},
         mul_limbs, schoolbook, square_limbs,
     },
 };
@@ -30,10 +31,10 @@ impl BoxedUint {
         let size = self.nlimbs() + rhs.len();
         let overlap = self.nlimbs().min(rhs.len());
 
-        if self.nlimbs().min(rhs.len()) >= KARATSUBA_MIN_STARTING_LIMBS {
+        if overlap >= MIN_STARTING_LIMBS {
             let mut limbs = vec![Limb::ZERO; size + overlap * 2];
-            let (out, scratch) = limbs.as_mut_slice().split_at_mut(size);
-            karatsuba_mul_limbs(&self.limbs, rhs, out, scratch);
+            let (out, scratch) = UintRef::new_mut(limbs.as_mut_slice()).split_at_mut(size);
+            widening_mul(&self.limbs, rhs, out, scratch.split_at_mut(overlap));
             limbs.truncate(size);
             return limbs.into();
         }
@@ -52,13 +53,12 @@ impl BoxedUint {
     fn wrapping_mul_limbs(&self, rhs: &[Limb]) -> Self {
         // Perform a widening Karatsuba multiplication and truncate
         // for very large numbers, where the performance is better.
-        if self.nlimbs().min(rhs.len()) > 200 {
-            let size = self.nlimbs() + rhs.len();
-            let overlap = self.nlimbs().min(rhs.len());
-            let mut limbs = vec![Limb::ZERO; size + overlap * 2];
-            let (out, scratch) = limbs.as_mut_slice().split_at_mut(size);
-            karatsuba_mul_limbs(&self.limbs, rhs, out, scratch);
-            limbs.truncate(self.nlimbs());
+        if self.nlimbs().min(rhs.len()) > 16 {
+            let size = self.nlimbs();
+            let mut limbs = vec![Limb::ZERO; size * 3];
+            let (out, scratch) = UintRef::new_mut(limbs.as_mut_slice()).split_at_mut(size);
+            wrapping_mul(&self.limbs, rhs, out, scratch.split_at_mut(size));
+            limbs.truncate(size);
             return limbs.into();
         }
 
@@ -71,10 +71,10 @@ impl BoxedUint {
     pub fn square(&self) -> Self {
         let size = self.nlimbs() * 2;
 
-        if self.nlimbs() >= KARATSUBA_MIN_STARTING_LIMBS * 2 {
+        if self.nlimbs() >= MIN_STARTING_LIMBS * 2 {
             let mut limbs = vec![Limb::ZERO; size * 2];
-            let (out, scratch) = limbs.as_mut_slice().split_at_mut(size);
-            karatsuba_square_limbs(&self.limbs, out, scratch);
+            let (out, scratch) = UintRef::new_mut(limbs.as_mut_slice()).split_at_mut(size);
+            widening_square(&self.limbs, out, scratch.split_at_mut(self.nlimbs()));
             limbs.truncate(size);
             return limbs.into();
         }
@@ -86,7 +86,17 @@ impl BoxedUint {
 
     /// Multiply `self` by itself, wrapping to the width of `self`.
     pub fn wrapping_square(&self) -> Self {
-        let mut limbs = vec![Limb::ZERO; self.nlimbs()];
+        let size = self.nlimbs();
+
+        if size > 16 {
+            let mut limbs = vec![Limb::ZERO; size * 3];
+            let (out, scratch) = UintRef::new_mut(limbs.as_mut_slice()).split_at_mut(size);
+            wrapping_square(&self.limbs, out, scratch.split_at_mut(size));
+            limbs.truncate(size);
+            return limbs.into();
+        }
+
+        let mut limbs = vec![Limb::ZERO; size];
         schoolbook::wrapping_square(&self.limbs, &mut limbs);
         limbs.into()
     }
@@ -226,26 +236,26 @@ mod tests {
         use rand_core::SeedableRng;
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(1);
 
-        for _ in 0..50 {
+        for i in 0..50 {
             let a = BoxedUint::random_bits(&mut rng, 4096);
-            assert_eq!(a.mul(&a), a.square(), "a = {a}");
-            assert_eq!(a.wrapping_mul(&a), a.wrapping_square(), "a = {a}");
+            assert_eq!(a.mul(&a), a.square(), "a={a}, i={i}");
+            assert_eq!(a.wrapping_mul(&a), a.wrapping_square(), "a={a}, i={i}");
         }
 
-        for _ in 0..50 {
+        for i in 0..50 {
             let a = BoxedUint::random_bits(&mut rng, 4096);
             let b = BoxedUint::random_bits(&mut rng, 5000);
             let expect = a.mul(&b);
-            assert_eq!(b.mul(&a), expect, "a={a}, b={b}");
+            assert_eq!(b.mul(&a), expect, "a={a}, b={b}, i={i}");
             assert_eq!(
                 a.wrapping_mul(&b),
                 expect.clone().resize_unchecked(a.bits_precision()),
-                "a={a}, b={b}"
+                "a={a}, b={b}, i={i}"
             );
             assert_eq!(
                 b.wrapping_mul(&a),
                 expect.clone().resize_unchecked(b.bits_precision()),
-                "a={a}, b={b}"
+                "a={a}, b={b}, i={i}"
             );
         }
     }
