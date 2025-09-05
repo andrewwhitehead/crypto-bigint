@@ -25,8 +25,8 @@
 use super::schoolbook;
 use crate::{Limb, Uint, UintRef};
 
-pub const MIN_STARTING_LIMBS: usize = 16;
-pub const MAX_REDUCE_LIMBS: usize = 12;
+pub const MIN_STARTING_LIMBS: usize = 32;
+pub const MAX_REDUCE_LIMBS: usize = 24;
 
 #[inline(always)]
 pub(crate) const fn uint_widening_mul<const LHS: usize, const RHS: usize>(
@@ -508,51 +508,40 @@ pub const fn wrapping_mul_even(
     let even = half & 1 == 0;
     let (x0, x1) = UintRef::new(lhs).split_at(half);
     let (y0, y1) = UintRef::new(rhs).split_at(half);
-    let (s0, s1) = scratch.0.split_at_mut(half);
 
-    // Compute s0 = (x0 + x1) % b
-    s0.copy_from(x0);
-    s0.carrying_add_assign(x1, Limb::ZERO);
-
-    // Compute s1 = (y0 + y1) % b
-    s1.copy_from(y0);
-    s1.carrying_add_assign(y1, Limb::ZERO);
-
-    // Compute z1 = (x0 + x1)(y0 + y1) into the second half of the output
-    wrapping_mul(
-        s0.as_slice(),
-        s1.as_slice(),
-        out.trailing_mut(half),
-        scratch.1.split_at_mut(half),
-    );
-
-    // Calculate z0 = x0•y0 into scratch
-    let z0 = scratch.0.leading_mut(size);
-    z0.fill(Limb::ZERO);
+    // Calculate z0 = x0•y0 into output
     widening_mul(
         x0.as_slice(),
         y0.as_slice(),
-        z0,
+        out,
+        scratch.0.split_at_mut(half),
+    );
+
+    // Compute z1 = x0•y1 into scratch
+    let z1 = scratch.0.leading_mut(half);
+    z1.fill(Limb::ZERO);
+    wrapping_mul(
+        x0.as_slice(),
+        y1.as_slice(),
+        z1,
         scratch.1.split_at_mut(half),
     );
 
-    // Add z0•(1 - b) to output
-    out.carrying_add_assign(z0, Limb::ZERO);
-    out.trailing_mut(half)
-        .borrowing_sub_assign(z0.leading(half), Limb::ZERO);
+    // Add z1•b to output
+    out.trailing_mut(half).carrying_add_assign(z1, Limb::ZERO);
 
-    // Calculate z2 = x1•y1 into first half of scratch
+    // Compute z2 = x1•y0 into scratch
     let z2 = scratch.0.leading_mut(half);
     z2.fill(Limb::ZERO);
     wrapping_mul(
         x1.as_slice(),
-        y1.as_slice(),
+        y0.as_slice(),
         z2,
         scratch.1.split_at_mut(half),
     );
 
-    // Subtract z2•b from output
-    out.trailing_mut(half).borrowing_sub_assign(z2, Limb::ZERO);
+    // Add z2•b to output
+    out.trailing_mut(half).carrying_add_assign(z2, Limb::ZERO);
 }
 
 #[inline(never)]
