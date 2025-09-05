@@ -5,8 +5,8 @@ use core::ops::{Mul, MulAssign};
 use subtle::CtOption;
 
 use crate::{
-    Checked, CheckedMul, Concat, ConcatMixed, ConcatenatingMul, ConstCtOption, Limb, Uint,
-    Wrapping, WrappingMul, Zero,
+    Checked, CheckedMul, Concat, ConcatMixed, ConcatenatingMul, ConstCtOption, Uint, Wrapping,
+    WrappingMul, Zero,
 };
 
 pub(crate) mod karatsuba;
@@ -208,22 +208,6 @@ impl<const LIMBS: usize> WrappingMul for Uint<LIMBS> {
     fn wrapping_mul(&self, v: &Self) -> Self {
         self.wrapping_mul(v)
     }
-}
-
-/// Wrapper function used by `BoxedUint`
-#[cfg(feature = "alloc")]
-pub(crate) fn mul_limbs(lhs: &[Limb], rhs: &[Limb], out: &mut [Limb]) {
-    debug_assert_eq!(lhs.len() + rhs.len(), out.len());
-    let (lo, hi) = out.split_at_mut(lhs.len());
-    schoolbook::mul_wide(lhs, rhs, lo, hi);
-}
-
-/// Wrapper function used by `BoxedUint`
-#[cfg(feature = "alloc")]
-pub(crate) const fn square_limbs(limbs: &[Limb], out: &mut [Limb]) {
-    debug_assert!(limbs.len() * 2 == out.len());
-    let (lo, hi) = out.split_at_mut(limbs.len());
-    schoolbook::square_wide(limbs, lo, hi);
 }
 
 #[cfg(test)]

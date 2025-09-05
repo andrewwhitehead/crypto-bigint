@@ -18,7 +18,7 @@
 //!   [z0.0, z0.0 + z0.1 - z1.0 + z2.0, z0.1 - z1.1 + z2.0 + z2.1, z2.1]
 //!
 
-use super::{schoolbook, square_limbs};
+use super::schoolbook;
 use crate::{Limb, Uint, UintRef};
 
 pub const MIN_STARTING_LIMBS: usize = 16;
@@ -67,7 +67,7 @@ pub(crate) const fn uint_widening_mul<const LHS: usize, const RHS: usize>(
     widening_mul(x1.as_slice(), y1.as_slice(), hi_mut, (scratch.0, scratch.1));
 
     // Calculate z1 into mid
-    let mut carry_b3 = compute_z1((x0, x1), (y0, y1), mid_mut, scratch);
+    let mut carry_b3 = compute_z1_mul((x0, x1), (y0, y1), mid_mut, scratch);
 
     // Subtract z0+z2 from mid
     let mut c = mid_mut.borrowing_sub_assign(lo_mut, Limb::ZERO);
@@ -336,7 +336,7 @@ pub const fn widening_mul_even(
     let (y0, y1) = UintRef::new(rhs).split_at(half);
 
     // Calculate z1 = (x0+x1)•(y0+y1) into the middle half of output
-    let mut carry_b3 = compute_z1(
+    let mut carry_b3 = compute_z1_mul(
         (x0, x1),
         (y0, y1),
         out.range_mut(half..size + half),
@@ -392,7 +392,7 @@ pub const fn widening_mul_even(
 
 /// A helper function to compute `z1 = (x0+x1)(y0+y1)`
 #[inline]
-const fn compute_z1(
+const fn compute_z1_mul(
     (x0, x1): (&UintRef, &UintRef),
     (y0, y1): (&UintRef, &UintRef),
     out: &mut UintRef,
@@ -563,7 +563,8 @@ pub(crate) const fn widening_square(
         "invalid arguments to widening_square"
     );
     if size <= MAX_REDUCE_LIMBS * 2 || (size & 1) == 1 {
-        square_limbs(limbs, out.as_mut_slice());
+        let (lo, hi) = out.as_mut_slice().split_at_mut(size);
+        schoolbook::square_wide(limbs, lo, hi);
         return;
     }
 

@@ -5,7 +5,7 @@ use crate::{
     mul::karatsuba::{wrapping_mul, wrapping_square},
     uint::mul::{
         karatsuba::{MIN_STARTING_LIMBS, widening_mul, widening_square},
-        mul_limbs, schoolbook, square_limbs,
+        schoolbook,
     },
 };
 use core::ops::{Mul, MulAssign};
@@ -40,7 +40,8 @@ impl BoxedUint {
         }
 
         let mut limbs = vec![Limb::ZERO; size];
-        mul_limbs(&self.limbs, rhs, &mut limbs);
+        let (lo, hi) = limbs.split_at_mut(self.nlimbs());
+        schoolbook::mul_wide(&self.limbs, rhs, lo, hi);
         limbs.into()
     }
 
@@ -80,7 +81,8 @@ impl BoxedUint {
         }
 
         let mut limbs = vec![Limb::ZERO; size];
-        square_limbs(&self.limbs, &mut limbs);
+        let (lo, hi) = limbs.split_at_mut(self.nlimbs());
+        schoolbook::square_wide(&self.limbs, lo, hi);
         limbs.into()
     }
 
