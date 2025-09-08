@@ -65,10 +65,10 @@ pub(crate) const fn uint_widening_mul<const LHS: usize, const RHS: usize>(
     let scratch = (scratch.0.as_mut_uint_ref(), scratch.1.as_mut_uint_ref());
 
     // Calculate z0 = x0•y0 into lo
-    widening_mul(x0.as_slice(), y0.as_slice(), lo_mut, (scratch.0, scratch.1));
+    widening_mul(x0.as_slice(), y0.as_slice(), lo_mut, scratch.0);
 
     // Calculate z2 = x1•y1 into hi
-    widening_mul(x1.as_slice(), y1.as_slice(), hi_mut, (scratch.0, scratch.1));
+    widening_mul(x1.as_slice(), y1.as_slice(), hi_mut, scratch.0);
 
     // Calculate z1 into mid
     let mut carry_b3 = compute_z1_mul((x0, x1), (y0, y1), mid_mut, scratch);
@@ -110,20 +110,20 @@ pub(crate) const fn uint_wrapping_mul<const LHS: usize, const RHS: usize>(
     }
 
     let mut out = Uint::ZERO;
-    let mut scratch = (Uint::<LHS>::ZERO, Uint::<LHS>::ZERO);
+    let mut scratch = Uint::<LHS>::ZERO;
     if LHS == RHS && LHS & 1 == 0 {
         wrapping_mul_even(
             lhs.as_limbs(),
             rhs.as_limbs(),
             out.as_mut_uint_ref(),
-            (scratch.0.as_mut_uint_ref(), scratch.1.as_mut_uint_ref()),
+            scratch.as_mut_uint_ref(),
         );
     } else {
         wrapping_mul(
             lhs.as_limbs(),
             rhs.as_limbs(),
             out.as_mut_uint_ref(),
-            (scratch.0.as_mut_uint_ref(), scratch.1.as_mut_uint_ref()),
+            scratch.as_mut_uint_ref(),
         );
     }
     out
@@ -155,14 +155,14 @@ pub(crate) const fn uint_widening_square<const LIMBS: usize>(
         mid.as_mut_uint_ref().leading_mut(size),
         hi.as_mut_uint_ref().leading_mut(size),
     );
-    let mut scratch = (Uint::<LIMBS>::ZERO, Uint::<LIMBS>::ZERO);
-    let scratch = (scratch.0.as_mut_uint_ref(), scratch.1.as_mut_uint_ref());
+    let mut scratch = Uint::<LIMBS>::ZERO;
+    let scratch = scratch.as_mut_uint_ref();
 
     // Calculate z0 = x0^2 into lo
-    widening_square(x0.as_slice(), lo_mut, (scratch.0, scratch.1));
+    widening_square(x0.as_slice(), lo_mut, scratch);
 
     // Calculate z2 = x1^2 into hi
-    widening_square(x1.as_slice(), hi_mut, (scratch.0, scratch.1));
+    widening_square(x1.as_slice(), hi_mut, scratch);
 
     // Calculate z1 = x0•x1 into mid
     widening_mul(x0.as_slice(), x1.as_slice(), mid_mut, scratch);
@@ -211,14 +211,14 @@ pub(crate) const fn uint_wrapping_square<const LIMBS: usize>(uint: &Uint<LIMBS>)
         mid.as_mut_uint_ref().leading_mut(size),
         hi.as_mut_uint_ref().leading_mut(size),
     );
-    let mut scratch = (Uint::<LIMBS>::ZERO, Uint::<LIMBS>::ZERO);
-    let scratch = (scratch.0.as_mut_uint_ref(), scratch.1.as_mut_uint_ref());
+    let mut scratch = Uint::<LIMBS>::ZERO;
+    let scratch = scratch.as_mut_uint_ref();
 
     // Calculate z0 = x0^2 into lo
-    widening_square(x0.as_slice(), lo_mut, (scratch.0, scratch.1));
+    widening_square(x0.as_slice(), lo_mut, scratch);
 
     // Calculate z2 = x1^2 into hi
-    widening_square(x1.as_slice(), hi_mut, (scratch.0, scratch.1));
+    widening_square(x1.as_slice(), hi_mut, scratch);
 
     // Calculate z1 = x0•x1 into mid
     widening_mul(x0.as_slice(), x1.as_slice(), mid_mut, scratch);
@@ -265,18 +265,12 @@ const fn combine_overlapping(
     hi.trailing_mut(half_size).add_assign_limb(carry_b3);
 }
 
-/// Multiply two limb slices, placing the result in `out`.
+/// Multiply two limb slices, adding the result to `out`.
 ///
 /// `lhs` and `rhs` may have different lengths.
-/// `out` is assumed to be zeroed.
 #[inline(never)]
 #[track_caller]
-pub const fn widening_mul(
-    lhs: &[Limb],
-    rhs: &[Limb],
-    out: &mut UintRef,
-    scratch: (&mut UintRef, &mut UintRef),
-) {
+pub const fn widening_mul(lhs: &[Limb], rhs: &[Limb], out: &mut UintRef, scratch: &mut UintRef) {
     assert!(
         lhs.len() + rhs.len() == out.len(),
         "invalid arguments to widening_mul"
@@ -315,23 +309,18 @@ pub const fn widening_mul(
     }
 }
 
-/// Multiply two limb slices, placing the result in `out`.
+/// Multiply two limb slices, adding the result to `out`.
 ///
 /// `lhs` and `rhs` must have the same length and an even number of limbs.
-/// `out` is assumed to be zeroed.
 pub const fn widening_mul_even(
     lhs: &[Limb],
     rhs: &[Limb],
     out: &mut UintRef,
-    scratch: (&mut UintRef, &mut UintRef),
+    scratch: &mut UintRef,
 ) {
     let size = lhs.len();
     assert!(
-        size & 1 == 0
-            && rhs.len() == size
-            && out.len() == size * 2
-            && scratch.0.len() >= size
-            && scratch.1.len() >= size,
+        size & 1 == 0 && rhs.len() == size && out.len() == size * 2 && scratch.len() >= size * 2,
         "invalid arguments to widening_mul_even"
     );
     let half = size / 2;
@@ -344,21 +333,15 @@ pub const fn widening_mul_even(
         (x0, x1),
         (y0, y1),
         out.range_mut(half..size + half),
-        (scratch.0, scratch.1),
+        scratch.split_at_mut(size),
     );
 
     // Calculate z0 = x0•y0 into scratch
-    let z0 = scratch.0.leading_mut(size);
+    let (z0, scratch) = scratch.split_at_mut(size);
     z0.fill(Limb::ZERO);
-    widening_mul(
-        x0.as_slice(),
-        y0.as_slice(),
-        z0,
-        scratch.1.split_at_mut(half),
-    );
+    widening_mul(x0.as_slice(), y0.as_slice(), z0, scratch);
 
     // Add z0 to output
-    // FIXME copy first half?
     let carry_b2 = out.leading_mut(size).carrying_add_assign(z0, Limb::ZERO);
 
     // Subtract z0•b from the output
@@ -368,14 +351,9 @@ pub const fn widening_mul_even(
     carry_b3 = carry_b3.wrapping_add(c);
 
     // Calculate z2 = x1•y1 into scratch
-    let z2 = scratch.0.leading_mut(size);
+    let z2 = z0;
     z2.fill(Limb::ZERO);
-    widening_mul(
-        x1.as_slice(),
-        y1.as_slice(),
-        z2,
-        scratch.1.split_at_mut(half),
-    );
+    widening_mul(x1.as_slice(), y1.as_slice(), z2, scratch);
 
     // Subtract z2•b from the output
     c = out
@@ -402,6 +380,7 @@ const fn compute_z1_mul(
     out: &mut UintRef,
     scratch: (&mut UintRef, &mut UintRef),
 ) -> Limb {
+    debug_assert!(scratch.0.len() == out.len() && scratch.1.len() >= out.len());
     let half = out.len() / 2;
     let (s0, s1) = scratch.0.leading_mut(out.len()).split_at_mut(half);
 
@@ -414,12 +393,7 @@ const fn compute_z1_mul(
     let s1c = s1.carrying_add_assign(y1, Limb::ZERO);
 
     // Compute z1 = (x0 + x1)(y0 + y1), except for the high bit of each sum
-    widening_mul(
-        s0.as_slice(),
-        s1.as_slice(),
-        out,
-        scratch.1.split_at_mut(half),
-    );
+    widening_mul(s0.as_slice(), s1.as_slice(), out, scratch.1);
 
     // Correct for missing high bits in multiplication
     // Add (s0•s1c)b to output
@@ -441,12 +415,7 @@ const fn compute_z1_mul(
 /// `lhs` and `rhs` may have different lengths.
 /// `out` is assumed to be zeroed.
 #[inline(never)]
-pub const fn wrapping_mul(
-    lhs: &[Limb],
-    rhs: &[Limb],
-    out: &mut UintRef,
-    scratch: (&mut UintRef, &mut UintRef),
-) {
+pub const fn wrapping_mul(lhs: &[Limb], rhs: &[Limb], out: &mut UintRef, scratch: &mut UintRef) {
     assert!(lhs.len() == out.len(), "invalid arguments to wrapping_mul");
     let size = {
         let overlap = if lhs.len() < rhs.len() {
@@ -483,24 +452,19 @@ pub const fn wrapping_mul(
     }
 }
 
-/// Multiply two limb slices, placing only the lower limbs of the result in `out`.
+/// Multiply two limb slices, adding only the lower limbs of the result to `out`.
 ///
 /// `lhs` and `rhs` must have the same length and an even number of limbs.
-/// `out` is assumed to be zeroed.
 #[inline(always)]
 pub const fn wrapping_mul_even(
     lhs: &[Limb],
     rhs: &[Limb],
     out: &mut UintRef,
-    scratch: (&mut UintRef, &mut UintRef),
+    scratch: &mut UintRef,
 ) {
     let size = lhs.len();
     assert!(
-        size & 1 == 0
-            && rhs.len() == size
-            && out.len() == size
-            && scratch.0.len() >= size
-            && scratch.1.len() >= size,
+        size & 1 == 0 && rhs.len() == size && out.len() == size && scratch.len() >= size,
         "invalid arguments to wrapping_mul_even"
     );
 
@@ -510,49 +474,30 @@ pub const fn wrapping_mul_even(
     let (y0, y1) = UintRef::new(rhs).split_at(half);
 
     // Calculate z0 = x0•y0 into output
-    widening_mul(
-        x0.as_slice(),
-        y0.as_slice(),
-        out,
-        scratch.0.split_at_mut(half),
-    );
+    widening_mul(x0.as_slice(), y0.as_slice(), out, scratch);
 
-    // Compute z1 = x0•y1 into scratch
-    let z1 = scratch.0.leading_mut(half);
-    z1.fill(Limb::ZERO);
+    // Add z1 = x0•y1 to second half of output
     wrapping_mul(
         x0.as_slice(),
         y1.as_slice(),
-        z1,
-        scratch.1.split_at_mut(half),
+        out.trailing_mut(half),
+        scratch,
     );
 
-    // Add z1•b to output
-    out.trailing_mut(half).carrying_add_assign(z1, Limb::ZERO);
-
-    // Compute z2 = x1•y0 into scratch
-    let z2 = scratch.0.leading_mut(half);
-    z2.fill(Limb::ZERO);
+    // Add z2 = x0•y1 to second half of output
     wrapping_mul(
         x1.as_slice(),
         y0.as_slice(),
-        z2,
-        scratch.1.split_at_mut(half),
+        out.trailing_mut(half),
+        scratch,
     );
-
-    // Add z2•b to output
-    out.trailing_mut(half).carrying_add_assign(z2, Limb::ZERO);
 }
 
 #[inline(never)]
-pub(crate) const fn widening_square(
-    limbs: &[Limb],
-    out: &mut UintRef,
-    scratch: (&mut UintRef, &mut UintRef),
-) {
+pub(crate) const fn widening_square(limbs: &[Limb], out: &mut UintRef, scratch: &mut UintRef) {
     let size = limbs.len();
     assert!(
-        out.len() == 2 * size && scratch.0.len() >= size && scratch.1.len() >= size,
+        out.len() == 2 * size && scratch.len() >= 2 * size,
         "invalid arguments to widening_square"
     );
     if size <= MAX_REDUCE_LIMBS * 2 || (size & 1) == 1 {
@@ -565,15 +510,15 @@ pub(crate) const fn widening_square(
     let (x0, x1) = limbs.split_at(half);
 
     // Calculate z0 = x0^2 into first half of output
-    widening_square(x0, out.leading_mut(size), (scratch.0, scratch.1));
+    widening_square(x0, out.leading_mut(size), scratch);
 
     // Calculate z2 = x1^2 into second half of output (z2•b^2)
-    widening_square(x1, out.trailing_mut(size), (scratch.0, scratch.1));
+    widening_square(x1, out.trailing_mut(size), scratch);
 
     // Calculate z1 = x0•x1 into scratch
-    let z1 = scratch.0.leading_mut(size);
+    let (z1, scratch) = scratch.split_at_mut(size);
     z1.fill(Limb::ZERO);
-    widening_mul(x0, x1, z1, scratch.1.split_at_mut(half));
+    widening_mul(x0, x1, z1, scratch);
 
     // Multiply z1 by 2
     let carry1 = z1.shl1_assign();
@@ -589,14 +534,10 @@ pub(crate) const fn widening_square(
 }
 
 #[inline(never)]
-pub(crate) fn wrapping_square(
-    limbs: &[Limb],
-    out: &mut UintRef,
-    scratch: (&mut UintRef, &mut UintRef),
-) {
+pub(crate) fn wrapping_square(limbs: &[Limb], out: &mut UintRef, scratch: &mut UintRef) {
     let size = limbs.len();
     assert!(
-        out.len() == size && scratch.0.len() >= size && scratch.1.len() >= size,
+        out.len() == size && scratch.len() >= size,
         "invalid arguments to wrapping_square"
     );
     if size <= MAX_REDUCE_LIMBS * 2 || (size & 1) == 1 {
@@ -608,12 +549,12 @@ pub(crate) fn wrapping_square(
     let (x0, x1) = limbs.split_at(half);
 
     // Calculate z0 = x0^2 into the output
-    widening_square(x0, out, (scratch.0, scratch.1));
+    widening_square(x0, out, scratch);
 
     // Calculate z1 = x0•x1 into scratch
-    let z1 = scratch.0.leading_mut(half);
+    let (z1, z1_scratch) = scratch.split_at_mut(half);
     z1.fill(Limb::ZERO);
-    wrapping_mul(x0, x1, z1, scratch.1.split_at_mut(half));
+    wrapping_mul(x0, x1, z1, z1_scratch);
 
     // Multiply z1 by 2
     z1.shl1_assign();

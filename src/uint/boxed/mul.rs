@@ -34,7 +34,7 @@ impl BoxedUint {
         if overlap >= MIN_STARTING_LIMBS {
             let mut limbs = vec![Limb::ZERO; size + overlap * 2];
             let (out, scratch) = UintRef::new_mut(limbs.as_mut_slice()).split_at_mut(size);
-            widening_mul(&self.limbs, rhs, out, scratch.split_at_mut(overlap));
+            widening_mul(&self.limbs, rhs, out, scratch);
             limbs.truncate(size);
             return limbs.into();
         }
@@ -56,9 +56,9 @@ impl BoxedUint {
         // for very large numbers, where the performance is better.
         if self.nlimbs().min(rhs.len()) > 16 {
             let size = self.nlimbs();
-            let mut limbs = vec![Limb::ZERO; size * 3];
+            let mut limbs = vec![Limb::ZERO; size * 2];
             let (out, scratch) = UintRef::new_mut(limbs.as_mut_slice()).split_at_mut(size);
-            wrapping_mul(&self.limbs, rhs, out, scratch.split_at_mut(size));
+            wrapping_mul(&self.limbs, rhs, out, scratch);
             limbs.truncate(size);
             return limbs.into();
         }
@@ -75,7 +75,7 @@ impl BoxedUint {
         if self.nlimbs() >= MIN_STARTING_LIMBS * 2 {
             let mut limbs = vec![Limb::ZERO; size * 2];
             let (out, scratch) = UintRef::new_mut(limbs.as_mut_slice()).split_at_mut(size);
-            widening_square(&self.limbs, out, scratch.split_at_mut(self.nlimbs()));
+            widening_square(&self.limbs, out, scratch);
             limbs.truncate(size);
             return limbs.into();
         }
@@ -91,9 +91,9 @@ impl BoxedUint {
         let size = self.nlimbs();
 
         if size > 16 {
-            let mut limbs = vec![Limb::ZERO; size * 3];
+            let mut limbs = vec![Limb::ZERO; size * 2];
             let (out, scratch) = UintRef::new_mut(limbs.as_mut_slice()).split_at_mut(size);
-            wrapping_square(&self.limbs, out, scratch.split_at_mut(size));
+            wrapping_square(&self.limbs, out, scratch);
             limbs.truncate(size);
             return limbs.into();
         }
