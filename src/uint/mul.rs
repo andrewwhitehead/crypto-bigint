@@ -41,12 +41,12 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         &self,
         rhs: &Uint<RHS_LIMBS>,
     ) -> (Self, Uint<RHS_LIMBS>) {
-        karatsuba::uint_widening_mul(self, rhs)
+        karatsuba::widening_mul_fixed(self.as_uint_ref(), rhs.as_uint_ref())
     }
 
     /// Perform wrapping multiplication, discarding overflow.
     pub const fn wrapping_mul<const RHS_LIMBS: usize>(&self, rhs: &Uint<RHS_LIMBS>) -> Self {
-        karatsuba::uint_wrapping_mul(self, rhs)
+        karatsuba::wrapping_mul_fixed::<LIMBS, RHS_LIMBS>(self.as_uint_ref(), rhs.as_uint_ref())
     }
 
     /// Perform saturating multiplication, returning `MAX` on overflow.
@@ -60,7 +60,7 @@ impl<const LIMBS: usize> Uint<LIMBS> {
 impl<const LIMBS: usize> Uint<LIMBS> {
     /// Square self, returning a "wide" result in two parts as (lo, hi).
     pub const fn square_wide(&self) -> (Self, Self) {
-        karatsuba::uint_widening_square(self)
+        karatsuba::widening_square_fixed(self.as_uint_ref())
     }
 
     /// Square self, returning a concatenated "wide" result.
@@ -80,7 +80,7 @@ impl<const LIMBS: usize> Uint<LIMBS> {
 
     /// Perform wrapping square, discarding overflow.
     pub const fn wrapping_square(&self) -> Uint<LIMBS> {
-        karatsuba::uint_wrapping_square(self)
+        karatsuba::wrapping_square_fixed(self.as_uint_ref())
     }
 
     /// Perform saturating squaring, returning `MAX` on overflow.

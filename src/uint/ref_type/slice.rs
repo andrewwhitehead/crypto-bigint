@@ -1,5 +1,3 @@
-use core::ops::Range;
-
 use super::UintRef;
 use crate::Limb;
 
@@ -35,6 +33,7 @@ impl UintRef {
     }
 
     /// Split the limb slice at a fixed position, producing head and tail slices.
+    #[track_caller]
     pub const fn split_at(&self, mid: usize) -> (&Self, &Self) {
         let (a, b) = self.0.split_at(mid);
         (UintRef::new(a), UintRef::new(b))
@@ -62,12 +61,6 @@ impl UintRef {
         Self::new_mut(self.0.split_at_mut(len).0)
     }
 
-    /// Access a limb slice starting from a fixed position.
-    #[inline]
-    pub const fn trailing(&self, start: usize) -> &Self {
-        Self::new(self.0.split_at(start).1)
-    }
-
     /// Access a mutable limb slice starting from the index `start`.
     #[inline]
     #[track_caller]
@@ -75,12 +68,8 @@ impl UintRef {
         Self::new_mut(self.0.split_at_mut(start).1)
     }
 
-    /// Access a mutable limb slice represented by a range.
     #[inline]
-    #[track_caller]
-    pub const fn range_mut(&mut self, range: Range<usize>) -> &mut Self {
-        assert!(range.end >= range.start, "invalid slice range");
-        self.trailing_mut(range.start)
-            .leading_mut(range.end - range.start)
+    pub const fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }

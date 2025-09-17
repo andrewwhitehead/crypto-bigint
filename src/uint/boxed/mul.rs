@@ -2,11 +2,7 @@
 
 use crate::{
     BoxedUint, CheckedMul, ConcatenatingMul, Limb, Uint, UintRef, Wrapping, WrappingMul, Zero,
-    mul::karatsuba::{wrapping_mul, wrapping_square},
-    uint::mul::{
-        karatsuba::{MIN_STARTING_LIMBS, widening_mul, widening_square},
-        schoolbook,
-    },
+    uint::mul::karatsuba,
 };
 use core::ops::{Mul, MulAssign};
 use subtle::{Choice, CtOption};
@@ -28,20 +24,12 @@ impl BoxedUint {
 
     #[inline(always)]
     fn widening_mul_limbs(&self, rhs: &[Limb]) -> Self {
-        let size = self.nlimbs() + rhs.len();
-        let overlap = self.nlimbs().min(rhs.len());
-
-        if overlap >= MIN_STARTING_LIMBS {
-            let mut limbs = vec![Limb::ZERO; size + overlap * 2];
-            let (out, scratch) = UintRef::new_mut(limbs.as_mut_slice()).split_at_mut(size);
-            widening_mul(&self.limbs, rhs, out, scratch);
-            limbs.truncate(size);
-            return limbs.into();
-        }
-
-        let mut limbs = vec![Limb::ZERO; size];
-        let (lo, hi) = limbs.split_at_mut(self.nlimbs());
-        schoolbook::mul_wide(&self.limbs, rhs, lo, hi);
+        let mut limbs = vec![Limb::ZERO; self.nlimbs() + rhs.len()];
+        karatsuba::widening_mul(
+            self.as_uint_ref(),
+            UintRef::new(rhs),
+            UintRef::new_mut(limbs.as_mut_slice()),
+        );
         limbs.into()
     }
 
@@ -52,54 +40,26 @@ impl BoxedUint {
 
     #[inline(always)]
     fn wrapping_mul_limbs(&self, rhs: &[Limb]) -> Self {
-        // Perform a widening Karatsuba multiplication and truncate
-        // for very large numbers, where the performance is better.
-        if self.nlimbs().min(rhs.len()) > 16 {
-            let size = self.nlimbs();
-            let mut limbs = vec![Limb::ZERO; size * 2];
-            let (out, scratch) = UintRef::new_mut(limbs.as_mut_slice()).split_at_mut(size);
-            wrapping_mul(&self.limbs, rhs, out, scratch);
-            limbs.truncate(size);
-            return limbs.into();
-        }
-
         let mut limbs = vec![Limb::ZERO; self.nlimbs()];
-        schoolbook::wrapping_mul(&self.limbs, rhs, &mut limbs);
+        karatsuba::wrapping_mul(
+            self.as_uint_ref(),
+            UintRef::new(rhs),
+            UintRef::new_mut(limbs.as_mut_slice()),
+        );
         limbs.into()
     }
 
     /// Multiply `self` by itself.
     pub fn square(&self) -> Self {
-        let size = self.nlimbs() * 2;
-
-        if self.nlimbs() >= MIN_STARTING_LIMBS * 2 {
-            let mut limbs = vec![Limb::ZERO; size * 2];
-            let (out, scratch) = UintRef::new_mut(limbs.as_mut_slice()).split_at_mut(size);
-            widening_square(&self.limbs, out, scratch);
-            limbs.truncate(size);
-            return limbs.into();
-        }
-
-        let mut limbs = vec![Limb::ZERO; size];
-        let (lo, hi) = limbs.split_at_mut(self.nlimbs());
-        schoolbook::square_wide(&self.limbs, lo, hi);
+        let mut limbs = vec![Limb::ZERO; self.nlimbs() * 2];
+        karatsuba::widening_square(self.as_uint_ref(), UintRef::new_mut(limbs.as_mut_slice()));
         limbs.into()
     }
 
     /// Multiply `self` by itself, wrapping to the width of `self`.
     pub fn wrapping_square(&self) -> Self {
-        let size = self.nlimbs();
-
-        if size > 16 {
-            let mut limbs = vec![Limb::ZERO; size * 2];
-            let (out, scratch) = UintRef::new_mut(limbs.as_mut_slice()).split_at_mut(size);
-            wrapping_square(&self.limbs, out, scratch);
-            limbs.truncate(size);
-            return limbs.into();
-        }
-
-        let mut limbs = vec![Limb::ZERO; size];
-        schoolbook::wrapping_square(&self.limbs, &mut limbs);
+        let mut limbs = vec![Limb::ZERO; self.nlimbs()];
+        karatsuba::wrapping_square(self.as_uint_ref(), UintRef::new_mut(limbs.as_mut_slice()));
         limbs.into()
     }
 }
