@@ -66,7 +66,7 @@ pub const fn wrapping_mul_add(lhs: &[Limb], rhs: &[Limb], out: &mut [Limb]) -> L
 
         loop {
             let j = k - i;
-            if k == out.len() {
+            if k >= out.len() {
                 meta_carry = meta_carry.wrapping_add(carry);
                 break;
             } else if j == rhs.len() {

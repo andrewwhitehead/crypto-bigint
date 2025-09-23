@@ -18,9 +18,27 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         let mut i = 0;
 
         while i < LIMBS {
-            let (w, c) = self.limbs[i].carrying_add(rhs.limbs[i], carry);
-            limbs[i] = w;
-            carry = c;
+            (limbs[i], carry) = self.limbs[i].carrying_add(rhs.limbs[i], carry);
+            i += 1;
+        }
+
+        (Self { limbs }, carry)
+    }
+
+    /// Computes `self + rhs + carry`, returning the result along with the new carry.
+    #[inline(always)]
+    pub const fn conditional_carrying_add(
+        &self,
+        rhs: &Self,
+        mut carry: Limb,
+        choice: ConstChoice,
+    ) -> (Self, Limb) {
+        let mut limbs = [Limb::ZERO; LIMBS];
+        let mut i = 0;
+
+        while i < LIMBS {
+            (limbs[i], carry) =
+                self.limbs[i].carrying_add(Limb::select(Limb::ZERO, rhs.limbs[i], choice), carry);
             i += 1;
         }
 

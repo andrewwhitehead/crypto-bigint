@@ -5,8 +5,17 @@ use core::ops::{Mul, MulAssign};
 use subtle::CtOption;
 
 use crate::{
-    Checked, CheckedMul, Concat, ConcatMixed, ConcatenatingMul, ConstCtOption, Uint, Wrapping,
-    WrappingMul, Zero,
+    Checked,
+    CheckedMul,
+    Concat,
+    ConcatMixed,
+    ConcatenatingMul,
+    ConstCtOption,
+    Uint,
+    Wrapping,
+    WrappingMul,
+    Zero,
+    // mul::karatsuba::{UintMul, cast},
 };
 
 pub(crate) mod karatsuba;
@@ -37,6 +46,7 @@ impl<const LIMBS: usize> Uint<LIMBS> {
 
     /// Compute "wide" multiplication as a 2-tuple containing the `(lo, hi)` components of the product, whose sizes
     /// correspond to the sizes of the operands.
+    #[inline(always)]
     pub const fn widening_mul<const RHS_LIMBS: usize>(
         &self,
         rhs: &Uint<RHS_LIMBS>,
@@ -45,8 +55,9 @@ impl<const LIMBS: usize> Uint<LIMBS> {
     }
 
     /// Perform wrapping multiplication, discarding overflow.
+    // #[inline(always)]
     pub const fn wrapping_mul<const RHS_LIMBS: usize>(&self, rhs: &Uint<RHS_LIMBS>) -> Self {
-        karatsuba::wrapping_mul_fixed::<LIMBS, RHS_LIMBS>(self.as_uint_ref(), rhs.as_uint_ref())
+        karatsuba::wrapping_mul_fixed::<LIMBS>(self.as_uint_ref(), rhs.as_uint_ref()).0
     }
 
     /// Perform saturating multiplication, returning `MAX` on overflow.
@@ -59,6 +70,7 @@ impl<const LIMBS: usize> Uint<LIMBS> {
 /// Squaring operations
 impl<const LIMBS: usize> Uint<LIMBS> {
     /// Square self, returning a "wide" result in two parts as (lo, hi).
+    #[inline(always)]
     pub const fn square_wide(&self) -> (Self, Self) {
         karatsuba::widening_square_fixed(self.as_uint_ref())
     }
@@ -79,6 +91,7 @@ impl<const LIMBS: usize> Uint<LIMBS> {
     }
 
     /// Perform wrapping square, discarding overflow.
+    // #[inline(always)]
     pub const fn wrapping_square(&self) -> Uint<LIMBS> {
         karatsuba::wrapping_square_fixed(self.as_uint_ref())
     }
@@ -358,6 +371,7 @@ mod tests {
         for _ in 0..50 {
             let a = U4096::random(&mut rng);
             assert_eq!(a.widening_mul(&a), a.square_wide(), "a = {a}");
+            assert_eq!(a.wrapping_mul(&a), a.wrapping_square(), "a = {a}");
         }
     }
 }

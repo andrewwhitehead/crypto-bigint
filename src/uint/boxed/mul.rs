@@ -25,10 +25,11 @@ impl BoxedUint {
     #[inline(always)]
     fn widening_mul_limbs(&self, rhs: &[Limb]) -> Self {
         let mut limbs = vec![Limb::ZERO; self.nlimbs() + rhs.len()];
-        karatsuba::widening_mul(
+        karatsuba::wrapping_mul(
             self.as_uint_ref(),
             UintRef::new(rhs),
             UintRef::new_mut(limbs.as_mut_slice()),
+            false,
         );
         limbs.into()
     }
@@ -45,6 +46,7 @@ impl BoxedUint {
             self.as_uint_ref(),
             UintRef::new(rhs),
             UintRef::new_mut(limbs.as_mut_slice()),
+            false,
         );
         limbs.into()
     }
@@ -52,7 +54,7 @@ impl BoxedUint {
     /// Multiply `self` by itself.
     pub fn square(&self) -> Self {
         let mut limbs = vec![Limb::ZERO; self.nlimbs() * 2];
-        karatsuba::widening_square(self.as_uint_ref(), UintRef::new_mut(limbs.as_mut_slice()));
+        karatsuba::wrapping_square(self.as_uint_ref(), UintRef::new_mut(limbs.as_mut_slice()));
         limbs.into()
     }
 
