@@ -1,7 +1,7 @@
 //! Multiplicative inverses of integers in Montgomery form with a constant modulus.
 
 use super::{ConstMontyForm, ConstMontyParams};
-use crate::{CtOption, Invert, modular::SafeGcdInverter};
+use crate::{Choice, CtOption, Invert};
 use core::marker::PhantomData;
 
 impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstMontyForm<MOD, LIMBS> {
@@ -23,13 +23,11 @@ impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstMontyForm<MOD, LIMBS
     /// otherwise it is the falsy value (in which case the first element's value is unspecified).
     #[must_use]
     pub const fn invert(&self) -> CtOption<Self> {
-        let inverter = SafeGcdInverter::new_with_inverse(
-            &MOD::PARAMS.modulus,
-            MOD::PARAMS.mod_inv,
+        let maybe_inverse = MOD::PARAMS.modulus().safegcd_invert_mod_precomp(
+            &self.montgomery_form,
+            MOD::PARAMS.mod_inv.limbs[0],
             &MOD::PARAMS.r2,
         );
-
-        let maybe_inverse = inverter.invert(&self.montgomery_form);
 
         let ret = Self {
             montgomery_form: maybe_inverse.to_inner_unchecked(),
@@ -63,20 +61,15 @@ impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstMontyForm<MOD, LIMBS
     /// respect to `MOD`.
     #[must_use]
     pub const fn invert_vartime(&self) -> CtOption<Self> {
-        let inverter = SafeGcdInverter::new_with_inverse(
-            &MOD::PARAMS.modulus,
-            MOD::PARAMS.mod_inv,
-            &MOD::PARAMS.r2,
-        );
+        let maybe_inverse = MOD::PARAMS
+            .modulus()
+            .bingcd_invert_mod_vartime(&self.retrieve());
 
-        let maybe_inverse = inverter.invert_vartime(&self.montgomery_form);
-
-        let ret = Self {
-            montgomery_form: maybe_inverse.to_inner_unchecked(),
-            phantom: PhantomData,
-        };
-
-        CtOption::new(ret, maybe_inverse.is_some())
+        if let Some(inv) = maybe_inverse {
+            CtOption::some(Self::new(&inv))
+        } else {
+            CtOption::new(Self::ZERO, Choice::FALSE)
+        }
     }
 }
 

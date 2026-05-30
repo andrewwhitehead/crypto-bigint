@@ -5,15 +5,18 @@ mod bits;
 mod cmp;
 mod ct;
 mod div;
+mod div2k_mod;
 mod invert_mod;
 mod mul;
+mod neg;
+mod neg_mod;
 mod shl;
 mod shr;
 mod slice;
 mod sqrt;
 mod sub;
 
-use crate::{Choice, Limb, NonZero, Odd, Uint, Word};
+use crate::{Choice, Limb, NonZero, Odd, Uint, WideWord, Word, word};
 use core::{
     fmt,
     ops::{Index, IndexMut},
@@ -243,6 +246,41 @@ impl UintRef {
         }
 
         carry
+    }
+
+    #[inline(always)]
+    pub(crate) const fn set_from_limb(&mut self, value: Limb) {
+        self.limbs[0] = value;
+        self.trailing_mut(1).fill(Limb::ZERO);
+    }
+
+    #[inline(always)]
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) const fn set_from_wide_word(&mut self, value: WideWord) {
+        if self.limbs.len() >= 2 {
+            (self.limbs[0].0, self.limbs[1].0) = word::split_wide(value);
+            self.trailing_mut(2).fill(Limb::ZERO);
+        } else {
+            debug_assert!(value >> Word::BITS == 0);
+            self.limbs[0].0 = value as Word;
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) const fn to_wide_word_unchecked(&self) -> WideWord {
+        if self.nlimbs() < 2 {
+            self.limbs[0].0 as WideWord
+        } else {
+            word::join(self.limbs[0].0, self.limbs[1].0)
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) const fn is_one(&self) -> Choice {
+        self.limbs[0]
+            .wrapping_sub(Limb::ONE)
+            .is_zero()
+            .and(self.trailing(1).is_zero())
     }
 }
 

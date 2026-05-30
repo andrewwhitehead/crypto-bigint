@@ -1,18 +1,19 @@
 //! Support for computing greatest common divisor of two `BoxedUint`s.
 
 use super::BoxedUint;
-use crate::{Gcd, NonZero, Odd, modular::safegcd};
+use crate::{Gcd, NonZero, Odd, Resize, primitives::u32_max};
 
 impl Gcd for BoxedUint {
     type Output = Self;
 
     /// Compute the greatest common divisor (GCD) of this number and another.
     fn gcd(&self, rhs: &Self) -> Self {
-        safegcd::boxed::gcd::<false>(self, rhs)
+        let bits_precision = u32_max(self.bits_precision(), rhs.bits_precision());
+        self.resize(bits_precision).safegcd(rhs)
     }
 
     fn gcd_vartime(&self, rhs: &Self) -> Self::Output {
-        safegcd::boxed::gcd::<true>(self, rhs)
+        self.bingcd_vartime(rhs)
     }
 }
 
@@ -20,11 +21,12 @@ impl Gcd<BoxedUint> for NonZero<BoxedUint> {
     type Output = NonZero<BoxedUint>;
 
     fn gcd(&self, rhs: &BoxedUint) -> Self::Output {
-        safegcd::boxed::gcd_nz::<false>(self, rhs)
+        let bits_precision = u32_max(self.bits_precision(), rhs.bits_precision());
+        self.resize(bits_precision).safegcd(rhs)
     }
 
     fn gcd_vartime(&self, rhs: &BoxedUint) -> Self::Output {
-        safegcd::boxed::gcd_nz::<true>(self, rhs)
+        NonZero::new(self.as_ref().gcd(rhs)).expect("ensured non-zero")
     }
 }
 
@@ -32,11 +34,12 @@ impl Gcd<BoxedUint> for Odd<BoxedUint> {
     type Output = Odd<BoxedUint>;
 
     fn gcd(&self, rhs: &BoxedUint) -> Self::Output {
-        safegcd::boxed::gcd_odd::<false>(self, rhs)
+        let bits_precision = u32_max(self.bits_precision(), rhs.bits_precision());
+        self.resize(bits_precision).safegcd(rhs)
     }
 
     fn gcd_vartime(&self, rhs: &BoxedUint) -> Self::Output {
-        safegcd::boxed::gcd_odd::<true>(self, rhs)
+        Odd::new(self.as_ref().gcd(rhs)).expect("ensured odd")
     }
 }
 

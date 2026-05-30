@@ -81,11 +81,27 @@ impl UintRef {
 
         borrow.lsb_to_choice()
     }
+
+    /// Perform an in-place subtraction of `rhs`, unless underflow would occur.
+    ///
+    /// The limb value `hi` is treated as an extra high limb of `self`, and its new value
+    /// is returned.
+    pub(crate) const fn try_sub_assign_with_carry_vartime(
+        &mut self,
+        mut hi: Limb,
+        rhs: &Self,
+    ) -> Limb {
+        if !hi.is_zero_vartime() || self.cmp_vartime(rhs).is_ge() {
+            let borrow = self.borrowing_sub_assign(rhs, Limb::ZERO);
+            hi = hi.wrapping_add(borrow);
+        }
+        hi
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{Choice, Limb, UintRef, Unsigned};
+    use crate::{Choice, Limb, UintRef};
 
     #[test]
     fn borrowing_sub_assign_mixed() {

@@ -1,5 +1,5 @@
 use super::UintRef;
-use crate::{Choice, Limb, bitlen, traits::BitOps, word};
+use crate::{Choice, Limb, Word, bitlen, traits::BitOps, word};
 
 impl UintRef {
     /// Get the precision of this number in bits.
@@ -217,6 +217,28 @@ impl UintRef {
             ));
             clear = clear.or(apply);
             i += 1;
+        }
+    }
+
+    #[inline(always)]
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) const fn unbounded_extract_word_vartime(&self, bit_pos: u32) -> Word {
+        let limb = bitlen::to_limbs(bit_pos);
+        let rshift = bit_pos & (Word::BITS - 1);
+        let lo = if limb >= self.limbs.len() {
+            0
+        } else {
+            self.limbs[limb].0
+        };
+        if rshift == 0 {
+            let hi = if limb + 1 >= self.limbs.len() {
+                0
+            } else {
+                self.limbs[limb + 1].0
+            };
+            (word::join(lo, hi) >> rshift) as Word
+        } else {
+            lo
         }
     }
 }

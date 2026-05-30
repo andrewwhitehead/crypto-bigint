@@ -11,7 +11,7 @@ impl<const LIMBS: usize> FixedMontyForm<LIMBS> {
     /// whether `self` is quadratic residue.
     #[must_use]
     pub const fn jacobi_symbol(&self) -> JacobiSymbol {
-        self.retrieve().jacobi_symbol(self.params().modulus())
+        self.as_montgomery().jacobi_symbol(self.params().modulus())
     }
 
     /// Compute the Jacobi symbol `(self|modulus)`.
@@ -22,7 +22,7 @@ impl<const LIMBS: usize> FixedMontyForm<LIMBS> {
     /// This method is variable-time with respect to the value of `self`.
     #[must_use]
     pub const fn jacobi_symbol_vartime(&self) -> JacobiSymbol {
-        self.retrieve()
+        self.as_montgomery()
             .jacobi_symbol_vartime(self.params().modulus())
     }
 }

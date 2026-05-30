@@ -90,6 +90,14 @@ fn bench_montgomery_ops<M: Measurement>(group: &mut BenchmarkGroup<'_, M>) {
         );
     });
 
+    group.bench_function("invert_vartime, U256", |b| {
+        b.iter_batched(
+            || ConstMontyForm::random_from_rng(&mut rng),
+            |x| black_box(x).invert_vartime(),
+            BatchSize::SmallInput,
+        );
+    });
+
     group.bench_function("multiplication, U256*U256", |b| {
         b.iter_batched(
             || {
@@ -134,7 +142,7 @@ fn bench_montgomery_ops<M: Measurement>(group: &mut BenchmarkGroup<'_, M>) {
         );
     });
 
-    group.bench_function("jacobi_symbol", |b| {
+    group.bench_function("jacobi_symbol, U256", |b| {
         b.iter_batched(
             || ConstMontyForm::random_from_rng(&mut rng),
             |a| a.jacobi_symbol(),
@@ -142,7 +150,7 @@ fn bench_montgomery_ops<M: Measurement>(group: &mut BenchmarkGroup<'_, M>) {
         );
     });
 
-    group.bench_function("jacobi_symbol_vartime", |b| {
+    group.bench_function("jacobi_symbol_vartime, U256", |b| {
         b.iter_batched(
             || ConstMontyForm::random_from_rng(&mut rng),
             |a| a.jacobi_symbol_vartime(),

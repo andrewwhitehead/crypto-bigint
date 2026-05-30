@@ -93,6 +93,12 @@ pub(crate) const fn choice_from_lsb(value: Word) -> Choice {
     Choice::from_u8_lsb((value & 1) as u8)
 }
 
+/// Returns the truthy value if `value == 1`, and the falsy value if `value == 0`.
+#[inline]
+pub(crate) const fn choice_from_lsb_wide(value: WideWord) -> Choice {
+    Choice::from_u8_lsb((value & 1) as u8)
+}
+
 /// Returns the truthy value if `value == Word::MAX`, and the falsy value if `value == 0`.
 #[inline]
 pub(crate) const fn choice_from_mask(value: Word) -> Choice {

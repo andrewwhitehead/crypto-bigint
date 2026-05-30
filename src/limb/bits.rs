@@ -7,10 +7,7 @@ impl Limb {
     /// Returns the falsy value for indices out of range.
     #[must_use]
     pub const fn bit(self, index: u32) -> Choice {
-        let index_in_limb = index & (Limb::BITS - 1);
-        self.shr(index_in_limb)
-            .lsb_to_choice()
-            .and(Choice::from_u32_eq(index, index_in_limb))
+        self.unbounded_shr(index).lsb_to_choice()
     }
 
     /// Returns `true` if the bit at position `index` is set, `false` for an unset bit

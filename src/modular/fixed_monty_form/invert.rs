@@ -1,7 +1,7 @@
 //! Multiplicative inverses of integers in Montgomery form with a modulus set at runtime.
 
-use super::{FixedMontyForm, FixedMontyParams};
-use crate::{CtOption, modular::SafeGcdInverter, traits::Invert};
+use super::FixedMontyForm;
+use crate::{Choice, CtOption, traits::Invert};
 
 impl<const LIMBS: usize> FixedMontyForm<LIMBS> {
     /// Computes `self^-1` representing the multiplicative inverse of `self`.
@@ -22,8 +22,12 @@ impl<const LIMBS: usize> FixedMontyForm<LIMBS> {
     /// otherwise it is the falsy value (in which case the first element's value is unspecified).
     #[must_use]
     pub const fn invert(&self) -> CtOption<Self> {
-        let inverter = self.params.inverter();
-        let maybe_inverse = inverter.invert(&self.montgomery_form);
+        let params = &self.params;
+        let maybe_inverse = params.modulus().safegcd_invert_mod_precomp(
+            &self.montgomery_form,
+            params.mod_inv.limbs[0],
+            &params.r2,
+        );
 
         let ret = Self {
             montgomery_form: maybe_inverse.to_inner_unchecked(),
@@ -57,15 +61,16 @@ impl<const LIMBS: usize> FixedMontyForm<LIMBS> {
     /// respect to `self`'s `params`.
     #[must_use]
     pub const fn invert_vartime(&self) -> CtOption<Self> {
-        let inverter = self.params.inverter();
-        let maybe_inverse = inverter.invert_vartime(&self.montgomery_form);
+        let maybe_inverse = self
+            .params
+            .modulus()
+            .bingcd_invert_mod_vartime(&self.retrieve());
 
-        let ret = Self {
-            montgomery_form: maybe_inverse.to_inner_unchecked(),
-            params: self.params,
-        };
-
-        CtOption::new(ret, maybe_inverse.is_some())
+        if let Some(inv) = maybe_inverse {
+            CtOption::some(Self::new(&inv, &self.params))
+        } else {
+            CtOption::new(Self::zero(&self.params), Choice::FALSE)
+        }
     }
 }
 
@@ -81,16 +86,9 @@ impl<const LIMBS: usize> Invert for FixedMontyForm<LIMBS> {
     }
 }
 
-impl<const LIMBS: usize> FixedMontyParams<LIMBS> {
-    /// Create a modular inverter for the modulus of these params.
-    const fn inverter(&self) -> SafeGcdInverter<LIMBS> {
-        SafeGcdInverter::new_with_inverse(&self.modulus, self.mod_inv, &self.r2)
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{FixedMontyForm, FixedMontyParams};
+    use crate::modular::{FixedMontyForm, FixedMontyParams};
     use crate::{Invert, Odd, U256};
 
     fn params() -> FixedMontyParams<{ U256::LIMBS }> {

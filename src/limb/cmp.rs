@@ -7,7 +7,7 @@ impl Limb {
     /// Is this limb an odd number?
     #[inline]
     #[must_use]
-    pub fn is_odd(self) -> Choice {
+    pub const fn is_odd(self) -> Choice {
         word::choice_from_lsb(self.0 & 1)
     }
 
@@ -30,6 +30,12 @@ impl Limb {
     #[inline]
     pub(crate) const fn is_nonzero(self) -> Choice {
         word::choice_from_nz(self.0)
+    }
+
+    /// Returns true if `self == 0` and false otherwise.
+    #[inline]
+    pub(crate) const fn is_zero_vartime(self) -> bool {
+        self.0 == 0
     }
 }
 

@@ -1,7 +1,6 @@
 use super::Uint;
 use crate::{
-    Choice, CtOption, InvertMod, Limb, NonZero, Odd, U64, UintRef, bitlen, modular::safegcd,
-    mul::karatsuba,
+    Choice, CtOption, InvertMod, Limb, NonZero, Odd, U64, UintRef, bitlen, mul::karatsuba,
 };
 
 /// Perform a modified recursive Hensel quadratic modular inversion to calculate
@@ -154,7 +153,7 @@ impl<const LIMBS: usize> Uint<LIMBS> {
     /// Computes the multiplicative inverse of `self` mod `modulus`, where `modulus` is odd.
     #[must_use]
     pub const fn invert_odd_mod(&self, modulus: &Odd<Self>) -> CtOption<Self> {
-        safegcd::invert_odd_mod::<LIMBS, false>(self, modulus)
+        modulus.safegcd_invert_mod(self)
     }
 
     /// Computes the multiplicative inverse of `self` mod `modulus`, where `modulus` is odd.
@@ -162,7 +161,11 @@ impl<const LIMBS: usize> Uint<LIMBS> {
     /// This method is variable-time with respect to `self`.
     #[must_use]
     pub const fn invert_odd_mod_vartime(&self, modulus: &Odd<Self>) -> CtOption<Self> {
-        safegcd::invert_odd_mod::<LIMBS, true>(self, modulus)
+        if let Some(inv) = modulus.bingcd_invert_mod_vartime(self) {
+            CtOption::some(inv)
+        } else {
+            CtOption::new(Self::ZERO, Choice::FALSE)
+        }
     }
 
     /// Computes the multiplicative inverse of `self` mod `modulus`.

@@ -2,7 +2,7 @@
 
 use crate::{
     BoxedUint, Choice, CtEq, CtLt, CtOption, CtSelect, InvertMod, Limb, NonZero, Odd, U64, bitlen,
-    modular::safegcd, uint::invert_mod::expand_invert_mod2k,
+    uint::invert_mod::expand_invert_mod2k,
 };
 
 impl BoxedUint {
@@ -16,13 +16,16 @@ impl BoxedUint {
     /// Computes the multiplicative inverse of `self` mod `modulus`, where `modulus` is odd.
     #[must_use]
     pub fn invert_odd_mod(&self, modulus: &Odd<Self>) -> CtOption<Self> {
-        safegcd::boxed::invert_odd_mod::<false>(self, modulus)
+        modulus.safegcd_invert_mod(self)
     }
 
     /// Computes the multiplicative inverse of `self` mod `modulus`, where `modulus` is odd.
     #[must_use]
     pub fn invert_odd_mod_vartime(&self, modulus: &Odd<Self>) -> CtOption<Self> {
-        safegcd::boxed::invert_odd_mod::<true>(self, modulus)
+        match modulus.bingcd_invert_mod_vartime(self) {
+            Some(inv) => CtOption::some(inv),
+            None => CtOption::none(),
+        }
     }
 
     /// Computes 1/`self` mod `2^k`.
@@ -114,14 +117,14 @@ impl BoxedUint {
 
         let inv_mod_s = self.invert_odd_mod(&s);
         let invertible_mod_s = inv_mod_s.is_some();
-        let inv_mod_s = inv_mod_s.unwrap_or(Self::zero_with_precision(self.bits_precision()));
+        let inv_mod_s = inv_mod_s.as_inner_unchecked();
 
         let (inverse_mod2k, invertible_mod_2k) = self.invert_mod2k(k);
         let is_some = invertible_mod_s & invertible_mod_2k;
 
         let s_inverse_mod2k = s.invert_mod_precision();
         let mut t = inverse_mod2k
-            .wrapping_sub(&inv_mod_s)
+            .wrapping_sub(inv_mod_s)
             .wrapping_mul(&s_inverse_mod2k);
         t.restrict_bits(k);
         let result = inv_mod_s.wrapping_add(s.wrapping_mul(&t));

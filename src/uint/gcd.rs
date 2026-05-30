@@ -1,19 +1,16 @@
 //! This module implements Binary (Extended) GCD for [`Uint`].
 
 use crate::{
-    Choice, Gcd, Int, NonZero, NonZeroUint, Odd, OddUint, Uint, Xgcd,
-    modular::{bingcd::xgcd::PatternXgcdOutput, safegcd},
-    primitives::u32_min,
+    Choice, Gcd, Int, NonZero, NonZeroUint, Odd, OddUint, Uint, Xgcd, primitives::u32_min,
 };
 
 impl<const LIMBS: usize> Uint<LIMBS> {
     /// Compute the greatest common divisor of `self` and `rhs`.
     #[must_use]
     pub const fn gcd(&self, rhs: &Self) -> Self {
-        let self_is_nz = self.is_nonzero();
-        // Note: is non-zero by construction
-        let self_nz = NonZero::new_unchecked(Uint::select(&Uint::ONE, self, self_is_nz));
-        Uint::select(rhs, self_nz.gcd_unsigned(rhs).as_ref(), self_is_nz)
+        let (self_nz, self_is_nz) = self.to_nz_or_one();
+        let gcd = self_nz.gcd_unsigned(rhs).get_copy();
+        Uint::select(rhs, &gcd, self_is_nz)
     }
 
     /// Compute the greatest common divisor of `self` and `rhs`.
@@ -21,12 +18,7 @@ impl<const LIMBS: usize> Uint<LIMBS> {
     /// Executes in variable time w.r.t. all input parameters.
     #[must_use]
     pub const fn gcd_vartime(&self, rhs: &Self) -> Self {
-        if self.is_zero_vartime() {
-            return *rhs;
-        }
-        NonZero::new_unchecked(*self)
-            .gcd_unsigned_vartime(rhs)
-            .get_copy()
+        self.bingcd_vartime(rhs)
     }
 
     /// Executes the Extended GCD algorithm.
@@ -34,44 +26,10 @@ impl<const LIMBS: usize> Uint<LIMBS> {
     /// Given `(self, rhs)`, computes `(g, x, y)`, s.t. `self * x + rhs * y = g = gcd(self, rhs)`.
     #[must_use]
     pub const fn xgcd(&self, rhs: &Self) -> UintXgcdOutput<LIMBS> {
-        // Make sure `self` and `rhs` are nonzero.
-        let self_is_zero = self.is_nonzero().not();
-        let self_nz = NonZero::new_unchecked(Uint::select(self, &Uint::ONE, self_is_zero));
-        let rhs_is_zero = rhs.is_nonzero().not();
-        let rhs_nz = NonZero::new_unchecked(Uint::select(rhs, &Uint::ONE, rhs_is_zero));
-
-        let NonZeroUintXgcdOutput {
-            gcd,
-            mut x,
-            mut y,
-            mut lhs_on_gcd,
-            mut rhs_on_gcd,
-        } = self_nz.xgcd(&rhs_nz);
-
-        // Correct the gcd in case self and/or rhs was zero
-        let mut gcd = *gcd.as_ref();
-        gcd = Uint::select(&gcd, rhs, self_is_zero);
-        gcd = Uint::select(&gcd, self, rhs_is_zero);
-
-        // Correct the Bézout coefficients in case self and/or rhs was zero.
-        x = Int::select(&x, &Int::ZERO, self_is_zero);
-        y = Int::select(&y, &Int::ONE, self_is_zero);
-        x = Int::select(&x, &Int::ONE, rhs_is_zero);
-        y = Int::select(&y, &Int::ZERO, rhs_is_zero);
-
-        // Correct the quotients in case self and/or rhs was zero.
-        lhs_on_gcd = Uint::select(&lhs_on_gcd, &Uint::ZERO, self_is_zero);
-        rhs_on_gcd = Uint::select(&rhs_on_gcd, &Uint::ONE, self_is_zero);
-        lhs_on_gcd = Uint::select(&lhs_on_gcd, &Uint::ONE, rhs_is_zero);
-        rhs_on_gcd = Uint::select(&rhs_on_gcd, &Uint::ZERO, rhs_is_zero);
-
-        UintXgcdOutput {
-            gcd,
-            x,
-            y,
-            lhs_on_gcd,
-            rhs_on_gcd,
-        }
+        // Make sure `lhs` is nonzero.
+        let (lhs_nz, lhs_is_nz) = self.to_nz_or_one();
+        let nz_output = lhs_nz.xgcd_unsigned(rhs);
+        nz_output.to_uint_output(rhs, lhs_is_nz)
     }
 }
 
@@ -81,21 +39,13 @@ impl<const LIMBS: usize> NonZeroUint<LIMBS> {
     pub const fn gcd_unsigned(&self, rhs: &Uint<LIMBS>) -> Self {
         let lhs = self.as_ref();
 
-        // Note the following two GCD identity rules:
-        // 1) gcd(2a, 2b) = 2 · gcd(a, b), and
-        // 2) gcd(a, 2b) = gcd(a, b) if a is odd.
-        //
-        // Combined, these rules imply that
-        // 3) gcd(2^i · a, 2^j · b) = 2^k · gcd(a, b), with k = min(i, j).
-        //
-        // However, to save ourselves having to divide out 2^j, we also note that
-        // 4) 2^k · gcd(a, b) = 2^k · gcd(a, 2^j · b)
+        // Factor out common factors of two and ensure `f` is odd.
+        // There is no need to strip the zeros from `g`, as
+        // `gcd(a, b) == gcd(a, b•2^k)` for odd `a`.
+        let lhs_tz = lhs.trailing_zeros();
+        let k = u32_min(lhs_tz, rhs.trailing_zeros());
 
-        let i = lhs.trailing_zeros();
-        let j = rhs.trailing_zeros();
-        let k = u32_min(i, j);
-
-        let odd_lhs = Odd::new_unchecked(lhs.shr(i));
+        let odd_lhs = Odd::new_unchecked(lhs.shr(lhs_tz));
         let gcd_div_2k = odd_lhs.gcd_unsigned(rhs);
         NonZero::new_unchecked(gcd_div_2k.as_ref().shl(k))
     }
@@ -105,15 +55,10 @@ impl<const LIMBS: usize> NonZeroUint<LIMBS> {
     /// Executes in variable time w.r.t. all input parameters.
     #[must_use]
     pub const fn gcd_unsigned_vartime(&self, rhs: &Uint<LIMBS>) -> Self {
-        let lhs = self.as_ref();
-
-        let i = lhs.trailing_zeros_vartime();
-        let j = rhs.trailing_zeros_vartime();
-        let k = u32_min(i, j);
-
-        let odd_lhs = Odd::new_unchecked(lhs.shr_vartime(i));
-        let gcd_div_2k = odd_lhs.gcd_unsigned_vartime(rhs);
-        NonZero::new_unchecked(gcd_div_2k.as_ref().shl_vartime(k))
+        self.as_ref()
+            .gcd_vartime(rhs)
+            .to_nz()
+            .expect_copied("gcd expected to be non-zero")
     }
 
     /// Execute the Extended GCD algorithm.
@@ -121,7 +66,15 @@ impl<const LIMBS: usize> NonZeroUint<LIMBS> {
     /// Given `(self, rhs)`, computes `(g, x, y)` s.t. `self * x + rhs * y = g = gcd(self, rhs)`.
     #[must_use]
     pub const fn xgcd(&self, rhs: &Self) -> NonZeroUintXgcdOutput<LIMBS> {
-        let (mut lhs, mut rhs) = (*self.as_ref(), *rhs.as_ref());
+        self.xgcd_unsigned(rhs.as_ref())
+    }
+
+    /// Execute the Extended GCD algorithm.
+    ///
+    /// Given `(self, rhs)`, computes `(g, x, y)` s.t. `self * x + rhs * y = g = gcd(self, rhs)`.
+    #[must_use]
+    pub const fn xgcd_unsigned(&self, rhs: &Uint<LIMBS>) -> NonZeroUintXgcdOutput<LIMBS> {
+        let (mut lhs, mut rhs) = (*self.as_ref(), *rhs);
 
         // Observe that gcd(2^i · a, 2^j · b) = 2^k * gcd(2^(i-k)·a, 2^(j-k)·b), with k = min(i,j).
         let i = lhs.trailing_zeros();
@@ -134,10 +87,8 @@ impl<const LIMBS: usize> NonZeroUint<LIMBS> {
         let swap = Choice::from_u32_lt(j, i);
         Uint::conditional_swap(&mut lhs, &mut rhs, swap);
         let lhs = lhs.to_odd().expect_copied("odd by construction");
-        let rhs = rhs.to_nz().expect_copied("non-zero by construction");
 
-        let odd_output = OddUintXgcdOutput::from_pattern_output(lhs.binxgcd_nz(&rhs));
-        odd_output.to_nz_output(k, swap)
+        lhs.xgcd_unsigned(&rhs).to_nz_output(k, swap)
     }
 }
 
@@ -146,8 +97,8 @@ impl<const LIMBS: usize> OddUint<LIMBS> {
     #[inline(always)]
     #[must_use]
     pub const fn gcd_unsigned(&self, rhs: &Uint<LIMBS>) -> Self {
-        if LIMBS == 1 {
-            Self::classic_bingcd(self, rhs)
+        if const { LIMBS == 2 } {
+            Self::bingcd(self, rhs)
         } else {
             Self::safegcd(self, rhs)
         }
@@ -159,63 +110,10 @@ impl<const LIMBS: usize> OddUint<LIMBS> {
     #[inline(always)]
     #[must_use]
     pub const fn gcd_unsigned_vartime(&self, rhs: &Uint<LIMBS>) -> Self {
-        if LIMBS == 1 {
-            Self::classic_bingcd_vartime(self, rhs)
-        } else {
-            Self::safegcd_vartime(self, rhs)
-        }
-    }
-
-    /// Compute the greatest common divisor of `self` and `rhs` using the Binary GCD algorithm.
-    ///
-    /// This function switches between the "classic" and "optimized" algorithm at a best-effort
-    /// threshold. When using [Uint]s with `LIMBS` close to the threshold, it may be useful to
-    /// manually test whether the classic or optimized algorithm is faster for your machine.
-    #[doc(hidden)]
-    #[inline(always)]
-    #[must_use]
-    pub const fn bingcd(&self, rhs: &Uint<LIMBS>) -> Self {
-        if LIMBS < 4 {
-            self.classic_bingcd(rhs)
-        } else {
-            self.optimized_bingcd(rhs)
-        }
-    }
-
-    /// Compute the greatest common divisor of `self` and `rhs`.
-    ///
-    /// Executes in variable time w.r.t. all input parameters.
-    ///
-    /// This function switches between the "classic" and "optimized" algorithm at a best-effort
-    /// threshold. When using [Uint]s with `LIMBS` close to the threshold, it may be useful to
-    /// manually test whether the classic or optimized algorithm is faster for your machine.
-    #[doc(hidden)]
-    #[inline(always)]
-    #[must_use]
-    pub const fn bingcd_vartime(&self, rhs: &Uint<LIMBS>) -> Self {
-        if LIMBS < 4 {
-            self.classic_bingcd_vartime(rhs)
-        } else {
-            self.optimized_bingcd_vartime(rhs)
-        }
-    }
-
-    /// Compute the greatest common divisor of `self` and `rhs`.
-    #[doc(hidden)]
-    #[inline]
-    #[must_use]
-    pub const fn safegcd(&self, rhs: &Uint<LIMBS>) -> Self {
-        safegcd::gcd_odd::<LIMBS, false>(self, rhs)
-    }
-
-    /// Compute the greatest common divisor of `self` and `rhs`.
-    ///
-    /// Executes in variable time w.r.t. all input parameters.
-    #[doc(hidden)]
-    #[inline]
-    #[must_use]
-    pub const fn safegcd_vartime(&self, rhs: &Uint<LIMBS>) -> Self {
-        safegcd::gcd_odd::<LIMBS, true>(self, rhs)
+        self.as_ref()
+            .gcd_vartime(rhs)
+            .to_odd()
+            .expect_copied("gcd expected to be odd")
     }
 
     /// Execute the Extended GCD algorithm.
@@ -224,7 +122,16 @@ impl<const LIMBS: usize> OddUint<LIMBS> {
     #[inline]
     #[must_use]
     pub const fn xgcd(&self, rhs: &Self) -> OddUintXgcdOutput<LIMBS> {
-        OddUintXgcdOutput::from_pattern_output(self.binxgcd_odd(rhs))
+        self.xgcd_unsigned(rhs.as_ref())
+    }
+
+    /// Execute the Extended GCD algorithm.
+    ///
+    /// Given `(self, rhs)`, computes `(g, x, y)` s.t. `self * x + rhs * y = g = gcd(self, rhs)`.
+    #[inline]
+    #[must_use]
+    pub const fn xgcd_unsigned(&self, rhs: &Uint<LIMBS>) -> OddUintXgcdOutput<LIMBS> {
+        self.safexgcd(rhs)
     }
 }
 
@@ -264,21 +171,26 @@ impl<const LIMBS: usize, GCD: Copy> XgcdOutput<LIMBS, GCD> {
     }
 }
 
-impl<const LIMBS: usize> OddUintXgcdOutput<LIMBS> {
-    pub(crate) const fn from_pattern_output(output: PatternXgcdOutput<LIMBS>) -> Self {
-        let gcd = output.gcd();
-        let (x, y) = output.bezout_coefficients();
-        let (lhs_on_gcd, rhs_on_gcd) = output.quotients();
-
-        OddUintXgcdOutput {
-            gcd,
-            x,
-            y,
-            lhs_on_gcd,
-            rhs_on_gcd,
+impl<const LIMBS: usize> NonZeroUintXgcdOutput<LIMBS> {
+    pub(crate) const fn to_uint_output(
+        self,
+        rhs: &Uint<LIMBS>,
+        lhs_is_nz: Choice,
+    ) -> UintXgcdOutput<LIMBS> {
+        UintXgcdOutput {
+            // Correct the gcd in case lhs was zero
+            gcd: Uint::select(rhs, self.gcd.as_ref(), lhs_is_nz),
+            // Correct the Bézout coefficients in case lhs was zero.
+            x: Int::select(&Int::ZERO, &self.x, lhs_is_nz),
+            y: Int::select(&Int::ONE, &self.y, lhs_is_nz),
+            // Correct the quotients in case lhs was zero.
+            lhs_on_gcd: Uint::select(&Uint::ZERO, &self.lhs_on_gcd, lhs_is_nz),
+            rhs_on_gcd: Uint::select(&Uint::ONE, &self.rhs_on_gcd, lhs_is_nz),
         }
     }
+}
 
+impl<const LIMBS: usize> OddUintXgcdOutput<LIMBS> {
     pub(crate) const fn to_nz_output(self, k: u32, swap: Choice) -> NonZeroUintXgcdOutput<LIMBS> {
         let Self {
             ref gcd,
