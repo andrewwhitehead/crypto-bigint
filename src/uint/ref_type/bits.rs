@@ -124,6 +124,47 @@ impl UintRef {
         count
     }
 
+    /// Calculate the number of leading zeros in the binary representation of this number, in
+    /// variable-time with respect to `self`.
+    #[inline(always)]
+    #[must_use]
+    pub const fn leading_zeros_vartime(&self) -> u32 {
+        let mut count = 0;
+        let mut i = self.limbs.len();
+        while i != 0 {
+            i -= 1;
+            let l = self.limbs[i];
+            if l.is_zero_vartime() {
+                count += Limb::BITS;
+            } else {
+                count += l.leading_zeros();
+                break;
+            }
+        }
+
+        count
+    }
+
+    /// Calculate the number of leading ones in the binary representation of this number, in
+    /// variable-time with respect to `self`.
+    #[inline(always)]
+    #[must_use]
+    pub const fn leading_ones_vartime(&self) -> u32 {
+        let mut count = 0;
+        let mut i = self.limbs.len();
+        while i != 0 {
+            i -= 1;
+            let l = self.limbs[i];
+            let z = l.trailing_ones();
+            count += z;
+            if z != Limb::BITS {
+                break;
+            }
+        }
+
+        count
+    }
+
     /// Calculate the number of trailing zeros in the binary representation of this number.
     #[inline(always)]
     #[must_use]
@@ -152,9 +193,10 @@ impl UintRef {
         let mut i = 0;
         while i < self.limbs.len() {
             let l = self.limbs[i];
-            let z = l.trailing_zeros();
-            count += z;
-            if z != Limb::BITS {
+            if l.is_zero_vartime() {
+                count += Limb::BITS;
+            } else {
+                count += l.trailing_zeros();
                 break;
             }
             i += 1;
@@ -212,7 +254,7 @@ impl UintRef {
         while i < self.nlimbs() {
             let apply = Choice::from_u32_eq(i as u32, limb);
             self.limbs[i] = self.limbs[i].bitand(Limb::select(
-                Limb(word::choice_to_mask(clear.not())),
+                Limb::choice_to_mask(clear.not()),
                 limb_mask,
                 apply,
             ));

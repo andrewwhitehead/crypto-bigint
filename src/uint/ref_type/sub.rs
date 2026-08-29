@@ -46,7 +46,7 @@ impl UintRef {
         choice: Choice,
     ) -> Choice {
         debug_assert!(self.bits_precision() <= rhs.bits_precision());
-        let mask = Limb::select(Limb::ZERO, Limb::MAX, choice);
+        let mask = Limb::choice_to_mask(choice);
         let mut borrow = Limb::ZERO;
 
         for i in 0..self.nlimbs() {

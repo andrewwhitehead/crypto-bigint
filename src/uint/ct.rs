@@ -29,12 +29,6 @@ impl<const LIMBS: usize> Uint<LIMBS> {
             i += 1;
         }
     }
-
-    /// Swap `a` and `b`
-    #[inline]
-    pub(crate) const fn swap(a: &mut Self, b: &mut Self) {
-        Self::conditional_swap(a, b, Choice::TRUE);
-    }
 }
 
 impl<const LIMBS: usize> CtAssign for Uint<LIMBS> {

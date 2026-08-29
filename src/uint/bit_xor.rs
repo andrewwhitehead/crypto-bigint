@@ -19,6 +19,21 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         Self { limbs }
     }
 
+    /// Perform bitwise `XOR` between `self` and the given [`Limb`], performing the `XOR` operation
+    /// on every limb of `self`.
+    #[must_use]
+    pub(crate) const fn bitxor_limb(&self, rhs: Limb) -> Self {
+        let mut limbs = [Limb::ZERO; LIMBS];
+        let mut i = 0;
+
+        while i < LIMBS {
+            limbs[i] = self.limbs[i].bitxor(rhs);
+            i += 1;
+        }
+
+        Self { limbs }
+    }
+
     /// Perform wrapping bitwise `XOR`.
     ///
     /// There's no way wrapping could ever happen.

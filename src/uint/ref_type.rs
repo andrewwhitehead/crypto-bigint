@@ -7,12 +7,14 @@ mod ct;
 mod div;
 mod invert_mod;
 mod mul;
+mod neg;
+mod neg_mod;
 mod shl;
 mod shr;
 mod slice;
 mod sub;
 
-use crate::{Choice, Limb, NonZero, Odd, Uint, Word};
+use crate::{Choice, Limb, NonZero, Odd, Uint, WideWord, Word, word};
 use core::{
     fmt,
     ops::{Index, IndexMut},
@@ -114,7 +116,7 @@ impl UintRef {
     }
 
     /// Access the number of limbs.
-    #[inline]
+    #[inline(always)]
     #[must_use]
     pub const fn nlimbs(&self) -> usize {
         self.limbs.len()
@@ -156,11 +158,7 @@ impl UintRef {
         } else {
             self.nlimbs()
         };
-        let mut i = 0;
-        while i < len {
-            out.limbs[i] = self.limbs[i];
-            i += 1;
-        }
+        out.as_mut_uint_ref().copy_from(self.leading(len));
         out
     }
 
@@ -242,6 +240,40 @@ impl UintRef {
 
         carry
     }
+
+    pub(crate) const fn set_from_limb(&mut self, value: Limb) {
+        self.limbs[0] = value;
+        self.trailing_mut(1).fill(Limb::ZERO);
+    }
+
+    #[inline(always)]
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) const fn set_from_wide_word(&mut self, value: WideWord) {
+        if self.nlimbs() >= 2 {
+            (self.limbs[0].0, self.limbs[1].0) = word::split_wide(value);
+            self.trailing_mut(2).fill(Limb::ZERO);
+        } else {
+            debug_assert!(value >> Word::BITS == 0);
+            self.limbs[0].0 = value as Word;
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) const fn to_wide_word_unchecked(&self) -> WideWord {
+        if self.nlimbs() < 2 {
+            self.limbs[0].0 as WideWord
+        } else {
+            word::join(self.limbs[0].0, self.limbs[1].0)
+        }
+    }
+
+    // pub(crate) const fn swap_mut<'a>(a: &'a mut Self, b: &'a mut Self) {
+    //     // SAFETY: allowed
+    //     #[allow(unsafe_code)]
+    //     unsafe {
+    //         core::ptr::swap(&mut a.limbs, &mut b.limbs)
+    //     };
+    // }
 }
 
 impl AsRef<[Limb]> for UintRef {

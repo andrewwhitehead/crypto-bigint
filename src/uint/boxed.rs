@@ -15,6 +15,7 @@ mod from;
 mod gcd;
 mod invert_mod;
 mod lcm;
+mod mod_symbol;
 mod mul;
 mod mul_mod;
 mod neg;

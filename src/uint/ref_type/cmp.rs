@@ -17,7 +17,7 @@ impl UintRef {
     }
 
     /// Returns [`Choice::TRUE`] if `self` != `0` or [`Choice::FALSE`] otherwise.
-    #[inline]
+    #[inline(always)]
     #[must_use]
     pub const fn is_nonzero(&self) -> Choice {
         let mut b = 0;
@@ -47,6 +47,14 @@ impl UintRef {
             i += 1;
         }
         true
+    }
+
+    #[inline(always)]
+    pub(crate) const fn is_one(&self) -> Choice {
+        self.limbs[0]
+            .wrapping_sub(Limb::ONE)
+            .is_zero()
+            .and(self.trailing(1).is_zero())
     }
 
     /// Returns the Ordering between `lhs` and `rhs`.

@@ -14,10 +14,10 @@ impl<const LIMBS: usize> Int<LIMBS> {
         rhs: &Odd<Uint<RHS_LIMBS>>,
     ) -> JacobiSymbol {
         let (abs, sign) = self.abs_sign();
-        let jacobi = abs.jacobi_symbol(rhs) as i64;
+        let symbol = abs.jacobi_symbol(rhs);
         // (-self|rhs) = -(self|rhs) iff rhs = 3 mod 4
         let swap = sign.and(word::choice_from_eq(rhs.as_ref().limbs[0].0 & 3, 3));
-        JacobiSymbol::from_i8(swap.select_i64(jacobi, -jacobi) as i8)
+        symbol.conditional_negate(swap)
     }
 
     /// Compute the Jacobi symbol `(self|rhs)`.
@@ -32,14 +32,12 @@ impl<const LIMBS: usize> Int<LIMBS> {
         rhs: &Odd<Uint<RHS_LIMBS>>,
     ) -> JacobiSymbol {
         let (abs, sign) = self.abs_sign();
-        let jacobi = abs.jacobi_symbol_vartime(rhs);
-        JacobiSymbol::from_i8(
-            if sign.to_bool_vartime() && rhs.as_ref().limbs[0].0 & 3 == 3 {
-                -(jacobi as i8)
-            } else {
-                jacobi as i8
-            },
-        )
+        let symbol = abs.jacobi_symbol_vartime(rhs);
+        if sign.to_bool_vartime() && rhs.as_ref().limbs[0].0 & 3 == 3 {
+            symbol.neg()
+        } else {
+            symbol
+        }
     }
 }
 

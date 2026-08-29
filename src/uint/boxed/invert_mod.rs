@@ -1,8 +1,8 @@
 //! [`BoxedUint`] modular inverse (i.e. reciprocal) operations.
 
 use crate::{
-    BoxedUint, Choice, CtEq, CtLt, CtOption, CtSelect, InvertMod, Limb, NonZero, Odd, U64, bitlen,
-    modular::safegcd, uint::invert_mod::expand_invert_mod2k,
+    BoxedUint, Choice, CtEq, CtLt, CtOption, CtSelect, InvertMod, Limb, NonZero, Odd, Resize, U64,
+    bitlen, uint::invert_mod::expand_invert_mod2k,
 };
 
 impl BoxedUint {
@@ -16,13 +16,15 @@ impl BoxedUint {
     /// Computes the multiplicative inverse of `self` mod `modulus`, where `modulus` is odd.
     #[must_use]
     pub fn invert_odd_mod(&self, modulus: &Odd<Self>) -> CtOption<Self> {
-        safegcd::boxed::invert_odd_mod::<false>(self, modulus)
+        let mod_inv = modulus.as_uint_ref().invert_mod_limb();
+        modulus.invert_mod_precomputed(self, mod_inv, None)
     }
 
     /// Computes the multiplicative inverse of `self` mod `modulus`, where `modulus` is odd.
     #[must_use]
     pub fn invert_odd_mod_vartime(&self, modulus: &Odd<Self>) -> CtOption<Self> {
-        safegcd::boxed::invert_odd_mod::<true>(self, modulus)
+        let mod_inv = modulus.as_uint_ref().invert_mod_limb();
+        modulus.invert_mod_precomputed_vartime(self, mod_inv)
     }
 
     /// Computes 1/`self` mod `2^k`.
@@ -114,14 +116,14 @@ impl BoxedUint {
 
         let inv_mod_s = self.invert_odd_mod(&s);
         let invertible_mod_s = inv_mod_s.is_some();
-        let inv_mod_s = inv_mod_s.unwrap_or(Self::zero_with_precision(self.bits_precision()));
+        let inv_mod_s = inv_mod_s.as_inner_unchecked();
 
         let (inverse_mod2k, invertible_mod_2k) = self.invert_mod2k(k);
         let is_some = invertible_mod_s & invertible_mod_2k;
 
         let s_inverse_mod2k = s.invert_mod_precision();
         let mut t = inverse_mod2k
-            .wrapping_sub(&inv_mod_s)
+            .wrapping_sub(inv_mod_s)
             .wrapping_mul(&s_inverse_mod2k);
         t.restrict_bits(k);
         let result = inv_mod_s.wrapping_add(s.wrapping_mul(&t));
@@ -171,6 +173,67 @@ impl Odd<BoxedUint> {
         }
 
         inv
+    }
+
+    /// Computes the multiplicative inverse of `value` mod `self`.
+    ///
+    /// `self_inv` must be `self.as_uint_ref().invert_mod_limb()` -- computed by the caller since
+    /// callers that already have it on hand (e.g. Montgomery params) would otherwise redo the
+    /// computation on every call.
+    ///
+    /// `monty_form_r2` seeds the gcd loop's cofactor accumulator instead of starting it at `1`:
+    /// passing a Montgomery form's `R^2 mod self` computes the inverse of a Montgomery-encoded
+    /// `value` directly in Montgomery form in one pass, with no separate decode/re-encode step.
+    #[inline]
+    #[must_use]
+    pub(crate) fn invert_mod_precomputed(
+        &self,
+        value: &BoxedUint,
+        self_inv: Limb,
+        monty_form_r2: Option<&BoxedUint>,
+    ) -> CtOption<BoxedUint> {
+        let bits_precision = self.bits_precision().max(value.bits_precision());
+        let mut a = value.resize(bits_precision);
+        let mut buf = BoxedUint::zero_with_precision(bits_precision * 3);
+
+        let is_some = crate::modular::gcd::invert_odd_mod(
+            a.as_mut_uint_ref(),
+            self.as_uint_ref(),
+            self_inv,
+            buf.as_mut_uint_ref(),
+            monty_form_r2.map(BoxedUint::as_uint_ref),
+        );
+        CtOption::new(a, is_some)
+    }
+
+    /// Computes the multiplicative inverse of `value` mod `self`.
+    ///
+    /// This method is variable-time with respect to `value`. `self_inv` must be
+    /// `self.as_uint_ref().invert_mod_limb()`, computed by the caller (see
+    /// [`Self::invert_mod_precomputed`]).
+    ///
+    /// Unlike [`Self::invert_mod_precomputed`], there is no cofactor-seeding capability here (the
+    /// underlying `invert_odd_mod_vartime` always starts its cofactor at `1`), so there's no
+    /// single-pass Montgomery-adjusted form -- callers that need one have to decode to the plain
+    /// domain first, invert there, then re-encode the result themselves.
+    #[inline]
+    #[must_use]
+    pub fn invert_mod_precomputed_vartime(
+        &self,
+        value: &BoxedUint,
+        self_inv: Limb,
+    ) -> CtOption<BoxedUint> {
+        let bits_precision = self.bits_precision().max(value.bits_precision());
+        let mut x = value.resize(bits_precision);
+        let mut buf = BoxedUint::zero_with_precision(bits_precision * 3);
+
+        let res = crate::modular::gcd::invert_odd_mod_vartime(
+            x.as_mut_uint_ref(),
+            self.as_uint_ref(),
+            self_inv,
+            buf.as_mut_uint_ref(),
+        );
+        CtOption::new(x, if res { Choice::TRUE } else { Choice::FALSE })
     }
 }
 
@@ -255,8 +318,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(a.invert_odd_mod(&m).unwrap(), expected);
-
+        assert_eq!(a.invert_odd_mod_vartime(&m).unwrap(), expected);
         assert_eq!(a.invert_mod(m.as_nz_ref()).unwrap(), expected);
+    }
+
+    #[test]
+    fn test_invert_one() {
+        let a = BoxedUint::from_be_hex("000000000000000000000000000000000000000000000001", 192)
+            .unwrap();
+        let m = BoxedUint::from_be_hex("000000000000000000000000000000010000000000000001", 192)
+            .unwrap()
+            .to_odd()
+            .unwrap();
+        let expected = Some(
+            BoxedUint::from_be_hex("000000000000000000000000000000000000000000000001", 192)
+                .unwrap(),
+        );
+
+        assert_eq!(a.invert_odd_mod(&m).into_option(), expected);
+        assert_eq!(a.invert_odd_mod_vartime(&m).into_option(), expected);
+        assert_eq!(a.invert_mod(m.as_nz_ref()).into_option(), expected);
     }
 
     #[test]
@@ -278,8 +359,9 @@ mod tests {
 
         // `m` is a multiple of `p1`, so no inverse exists
         let res = p1.invert_odd_mod(&m);
-        let is_none: bool = res.is_none().into();
-        assert!(is_none);
+        let res_vartime = p1.invert_odd_mod_vartime(&m);
+        assert!(res.is_none().to_bool_vartime());
+        assert!(res_vartime.is_none().to_bool_vartime());
     }
 
     #[test]
@@ -327,7 +409,9 @@ mod tests {
         let m = BoxedUint::from(13u64).to_odd().unwrap();
 
         let res = a.invert_odd_mod(&m).unwrap();
+        let res_vartime = a.invert_odd_mod_vartime(&m).unwrap();
         assert_eq!(BoxedUint::from(9u64), res);
+        assert_eq!(res, res_vartime);
     }
 
     #[test]
@@ -336,17 +420,19 @@ mod tests {
         let m = BoxedUint::from(49u64).to_odd().unwrap();
 
         let res = a.invert_odd_mod(&m);
-        let is_none: bool = res.is_none().into();
-        assert!(is_none);
+        let res_vartime = a.invert_odd_mod_vartime(&m);
+        assert!(res.is_none().to_bool_vartime());
+        assert!(res_vartime.is_none().to_bool_vartime());
     }
 
     #[test]
     fn test_invert_edge() {
-        assert!(bool::from(
+        assert!(
             BoxedUint::zero()
                 .invert_odd_mod(&BoxedUint::one().to_odd().unwrap())
                 .is_none()
-        ));
+                .to_bool_vartime()
+        );
         assert_eq!(
             BoxedUint::one()
                 .invert_odd_mod(&BoxedUint::one().to_odd().unwrap())
@@ -359,11 +445,12 @@ mod tests {
                 .unwrap(),
             BoxedUint::one()
         );
-        assert!(bool::from(
+        assert!(
             BoxedUint::from(U256::MAX)
                 .invert_odd_mod(&BoxedUint::from(U256::MAX).to_odd().unwrap())
                 .is_none()
-        ));
+                .to_bool_vartime()
+        );
     }
 
     #[test]
@@ -375,5 +462,14 @@ mod tests {
             let a_inv = a.invert_mod_precision();
             assert_eq!(a.as_ref().wrapping_mul(&a_inv), BoxedUint::one());
         }
+    }
+
+    #[test]
+    fn invert_test() {
+        let a = BoxedUint::from_be_hex("00000000000000D500000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000420C36C94D",1024).unwrap();
+        let b = Odd::new_unchecked(
+        BoxedUint::from_be_hex("00000000000000D500000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000420C36C94D", 1024).unwrap());
+        let inv = a.invert_odd_mod_vartime(&b).unwrap();
+        assert_eq!(inv, BoxedUint::from_be_hex("000000000000008BDDDD2B28E3470660DD0AFF8F90749FA5ABE05D993B03A297FFE5937094F23FF0DA0F269C7862D36B4808CFC80C7224AF8E3AD2E1DCF3524F20AE68E81442FB664B989B0581E17C705E8CF38ECCE37B1CCB6DCAE0C304657A8AA1913FA23B799070D8D9708E2D2B1EE5BB3C41FC7D360F5F80ACBF624D2211", 1024).unwrap());
     }
 }

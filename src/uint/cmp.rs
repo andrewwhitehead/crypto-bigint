@@ -50,12 +50,6 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         UintRef::lt(lhs.as_uint_ref(), rhs.as_uint_ref())
     }
 
-    /// Returns the truthy value if `self <= rhs` and the falsy value otherwise.
-    #[inline]
-    pub(crate) const fn lte(lhs: &Self, rhs: &Self) -> Choice {
-        Self::gt(lhs, rhs).not()
-    }
-
     /// Returns the truthy value if `self > rhs` and the falsy value otherwise.
     #[inline]
     pub(crate) const fn gt(lhs: &Self, rhs: &Self) -> Choice {
@@ -118,25 +112,6 @@ mod tests {
         assert!(!<U128 as Integer>::is_odd(&U128::ZERO).to_bool());
         assert!(<U128 as Integer>::is_odd(&U128::ONE).to_bool());
         assert!(<U128 as Integer>::is_odd(&U128::MAX).to_bool());
-    }
-
-    #[test]
-    fn lte() {
-        let a = U128::ZERO;
-        let b = U128::ONE;
-        let c = U128::MAX;
-
-        assert!(Uint::lte(&a, &b).to_bool());
-        assert!(Uint::lte(&a, &c).to_bool());
-        assert!(Uint::lte(&b, &c).to_bool());
-
-        assert!(Uint::lte(&a, &a).to_bool());
-        assert!(Uint::lte(&b, &b).to_bool());
-        assert!(Uint::lte(&c, &c).to_bool());
-
-        assert!(!Uint::lte(&b, &a).to_bool());
-        assert!(!Uint::lte(&c, &a).to_bool());
-        assert!(!Uint::lte(&c, &b).to_bool());
     }
 
     #[test]

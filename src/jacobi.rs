@@ -1,4 +1,5 @@
-use crate::{Choice, CtEq};
+use crate::{Choice, CtEq, Word};
+use core::mem::transmute;
 use core::ops::Neg;
 
 /// Possible return values for Jacobi symbol calculations.
@@ -19,22 +20,36 @@ pub enum JacobiSymbol {
 }
 
 impl JacobiSymbol {
+    #[inline(always)]
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
+    pub(crate) const fn from_sign(sign: Word) -> Self {
+        debug_assert!(sign & !1 == 0);
+        let signed = sign as i8 * -2 + 1;
+        Self::from_i8(signed)
+    }
+
+    #[inline(always)]
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) const fn zero_if(self, choice: Choice) -> Self {
+        Self::from_i8(choice.select_i64(self as i64, 0) as i8)
+    }
+
     /// Determine if the symbol is zero.
     #[must_use]
     pub const fn is_zero(&self) -> Choice {
-        Choice::from_i64_eq(*self as i8 as i64, 0)
+        Choice::from_i64_eq(*self as i64, 0)
     }
 
     /// Determine if the symbol is one.
     #[must_use]
     pub const fn is_one(&self) -> Choice {
-        Choice::from_i64_eq(*self as i8 as i64, 1)
+        Choice::from_i64_eq(*self as i64, 1)
     }
 
     /// Determine if the symbol is minus one.
     #[must_use]
     pub const fn is_minus_one(&self) -> Choice {
-        Choice::from_i64_eq(*self as i8 as i64, -1)
+        Choice::from_i64_eq(*self as i64, -1)
     }
 
     /// Negate the symbol.
@@ -47,13 +62,19 @@ impl JacobiSymbol {
         }
     }
 
+    /// Conditionally negate the symbol.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) const fn conditional_negate(self, negate: Choice) -> Self {
+        let j = self as i64;
+        Self::from_i8(negate.select_i64(j, -j) as i8)
+    }
+
+    #[allow(unsafe_code)]
     pub(crate) const fn from_i8(value: i8) -> Self {
-        match value {
-            0 => Self::Zero,
-            1 => Self::One,
-            -1 => Self::MinusOne,
-            _ => panic!("invalid value for Jacobi symbol"),
-        }
+        assert!(value.abs() & !1 == 0);
+        // SAFETY: supported values are checked by assertion
+        unsafe { transmute(value) }
     }
 }
 

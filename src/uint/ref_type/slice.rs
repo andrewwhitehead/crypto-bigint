@@ -5,7 +5,7 @@ impl UintRef {
     /// Copy the contents from a [`UintRef`].
     ///
     /// # Panics
-    /// If `self.nlimbs() != rhs.nlimbs()`
+    /// If `self.nlimbs() < rhs.nlimbs()`
     #[inline(always)]
     #[track_caller]
     pub const fn copy_from(&mut self, rhs: &UintRef) {
@@ -15,7 +15,7 @@ impl UintRef {
     /// Conditionally copy the contents from a [`UintRef`].
     ///
     /// # Panics
-    /// If `self.nlimbs() != rhs.nlimbs()`
+    /// If `self.nlimbs() < rhs.nlimbs()`
     #[inline(always)]
     #[track_caller]
     pub const fn conditional_copy_from(&mut self, rhs: &UintRef, copy: Choice) {
@@ -25,32 +25,34 @@ impl UintRef {
     /// Copy the contents from a limb slice.
     ///
     /// # Panics
-    /// If `self.nlimbs() != limbs.len()`
+    /// If `self.nlimbs() < limbs.len()`
     #[inline(always)]
     #[track_caller]
     pub const fn copy_from_slice(&mut self, limbs: &[Limb]) {
         // TODO core::slice::copy_from_slice should eventually be const
-        assert!(self.limbs.len() == limbs.len(), "length mismatch");
+        assert!(self.limbs.len() >= limbs.len(), "length mismatch");
         let mut i = 0;
-        while i < self.limbs.len() {
+        while i < limbs.len() {
             self.limbs[i] = limbs[i];
             i += 1;
         }
+        self.trailing_mut(i).fill(Limb::ZERO);
     }
 
     /// Conditionally copy the contents from a limb slice.
     ///
     /// # Panics
-    /// If `self.nlimbs() != rhs.nlimbs()`
+    /// If `self.nlimbs() < rhs.nlimbs()`
     #[inline(always)]
     #[track_caller]
     pub const fn conditional_copy_from_slice(&mut self, limbs: &[Limb], copy: Choice) {
-        assert!(self.limbs.len() == limbs.len(), "length mismatch");
+        assert!(self.limbs.len() >= limbs.len(), "length mismatch");
         let mut i = 0;
-        while i < self.limbs.len() {
+        while i < limbs.len() {
             self.limbs[i] = Limb::select(self.limbs[i], limbs[i], copy);
             i += 1;
         }
+        self.trailing_mut(i).conditional_set_zero(copy);
     }
 
     /// Fill the limb slice with a repeated limb value.
@@ -113,7 +115,7 @@ impl UintRef {
         Self::new_mut(self.limbs.split_at_mut(start).1)
     }
 
-    /// Determine if the slice has zero limbs.
+    /// Determine if the limb slice has zero limbs.
     #[inline]
     #[must_use]
     pub const fn is_empty(&self) -> bool {

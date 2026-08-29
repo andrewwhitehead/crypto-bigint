@@ -25,7 +25,7 @@ mod sub;
 mod rand;
 
 use crate::{
-    Bounded, Choice, ConstOne, ConstZero, Constants, CtEq, CtOption, Integer, NonZero, One,
+    Bounded, Choice, ConstOne, ConstZero, Constants, CtEq, CtOption, Integer, NonZero, Odd, One,
     UintRef, Unsigned, WideWord, Word, Zero, primitives::u32_bits, traits::sealed::Sealed, word,
 };
 use core::{fmt, ptr, slice};
@@ -117,9 +117,47 @@ impl Limb {
     }
 
     /// Convert the least significant bit of this [`Limb`] to a [`Choice`].
+    #[inline(always)]
     #[must_use]
     pub const fn lsb_to_choice(self) -> Choice {
         word::choice_from_lsb(self.0)
+    }
+
+    /// Convert to an [`Odd<Limb>`].
+    ///
+    /// Returns some if the original value is odd, and none otherwise.
+    #[must_use]
+    pub const fn to_odd(self) -> CtOption<Odd<Self>> {
+        let (odd, self_odd) = self.to_odd_or_one();
+        CtOption::new(odd, self_odd)
+    }
+
+    /// Convert to a [`Odd<Limb>`], defaulting to `Self::ONE`.
+    ///
+    /// Returns a pair consisting of a [`Odd<Limb>`], and a [`Choice`]
+    /// indicating whether the original value was odd (and preserved).
+    #[inline(always)]
+    #[must_use]
+    pub(crate) const fn to_odd_or_one(self) -> (Odd<Self>, Choice) {
+        let is_odd = self.is_odd();
+        (
+            Odd::new_unchecked(Self::select(Self::ONE, self, is_odd)),
+            is_odd,
+        )
+    }
+
+    /// Borrow this [`Limb`] as a [`UintRef`].
+    #[inline(always)]
+    #[must_use]
+    pub const fn as_uint_ref(&self) -> &UintRef {
+        UintRef::new(slice::from_ref(self))
+    }
+
+    /// Borrow this [`Limb`] as a mutable [`UintRef`].
+    #[inline(always)]
+    #[must_use]
+    pub const fn as_mut_uint_ref(&mut self) -> &mut UintRef {
+        UintRef::new_mut(slice::from_mut(self))
     }
 
     /// Convert a shared reference to an array of [`Limb`]s into a shared reference to their inner

@@ -1,6 +1,6 @@
 //! [`Uint`] bitwise right shift operations.
 
-use crate::{CtOption, Limb, Shr, ShrAssign, ShrVartime, Uint, WrappingShr, primitives::u32_rem};
+use crate::{CtOption, Shr, ShrAssign, ShrVartime, Uint, WrappingShr, primitives::u32_rem};
 
 impl<const LIMBS: usize> Uint<LIMBS> {
     /// Computes `self >> shift`.
@@ -100,23 +100,6 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         res
     }
 
-    /// Computes `self >> (shift * Limb::BITS)` where `shift < shift_upper_bound`.
-    ///
-    /// The runtime is determined by `shift_upper_bound` which may be larger or smaller than
-    /// `LIMBS`.
-    ///
-    /// # Panics
-    /// - if the shift exceeds the upper bound.
-    #[inline]
-    #[must_use]
-    #[track_caller]
-    pub(crate) const fn bounded_shr_by_limbs(&self, shift: u32, shift_upper_bound: u32) -> Self {
-        let mut res = *self;
-        res.as_mut_uint_ref()
-            .bounded_shr_by_limbs_assign(shift, shift_upper_bound);
-        res
-    }
-
     /// Computes `self >> shift` in a panic-free manner, returning zero if the shift exceeds the
     /// precision.
     #[inline(never)]
@@ -186,22 +169,6 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         res.as_mut_uint_ref().shr1_assign();
         res
     }
-
-    /// Computes `self >> shift` where `0 <= shift < Limb::BITS`,
-    /// returning the result and the carry.
-    ///
-    /// # Panics
-    /// - if `shift >= Limb::BITS`.
-    #[inline(always)]
-    #[must_use]
-    #[track_caller]
-    pub(crate) const fn shr_limb_with_carry(&self, shift: u32, carry: Limb) -> (Self, Limb) {
-        let mut res = *self;
-        let carry = res
-            .as_mut_uint_ref()
-            .shr_assign_limb_with_carry(shift, carry);
-        (res, carry)
-    }
 }
 
 macro_rules! impl_shr {
@@ -258,7 +225,7 @@ impl<const LIMBS: usize> ShrVartime for Uint<LIMBS> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Limb, ShrVartime, U128, U192, Uint, WrappingShr};
+    use crate::{ShrVartime, U128, U192, Uint, WrappingShr};
 
     const N: U192 = U192::from_be_hex("FFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141");
 
@@ -311,42 +278,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
-    fn shr_limb_with_carry_shift_too_large() {
-        let _ = U128::ONE.shr_limb_with_carry(Limb::BITS, Limb::ZERO);
-    }
-
-    #[test]
-    fn shr_limb_with_carry() {
-        let val = U128::from_be_hex("876543210FEDCBA90123456FEDCBA987");
-
-        // Shift by zero
-        let (res, carry) = val.shr_limb_with_carry(0, Limb::ZERO);
-        assert_eq!(res, val);
-        assert_eq!(carry, Limb::ZERO);
-
-        // Shift by one
-        let (res, carry) = val.shr_limb_with_carry(1, Limb::ZERO);
-        assert_eq!(res, val.shr_vartime(1));
-        assert_eq!(carry, val.limbs[0].shl(Limb::BITS - 1));
-
-        // Shift by any
-        let (res, carry) = val.shr_limb_with_carry(13, Limb::ZERO);
-        assert_eq!(res, val.shr_vartime(13));
-        assert_eq!(carry, val.limbs[0].shl(Limb::BITS - 13));
-
-        // Shift by max
-        let (res, carry) = val.shr_limb_with_carry(Limb::BITS - 1, Limb::ZERO);
-        assert_eq!(res, val.shr_vartime(Limb::BITS - 1));
-        assert_eq!(carry, val.limbs[0].shl(1));
-    }
-
-    #[test]
     fn shr_by_limbs() {
         let val = Uint::<2>::from_words([1, 99]);
-        assert_eq!(val.bounded_shr_by_limbs(0, 3).as_words(), &[1, 99]);
-        assert_eq!(val.bounded_shr_by_limbs(1, 3).as_words(), &[99, 0]);
-        assert_eq!(val.bounded_shr_by_limbs(2, 3).as_words(), &[0, 0]);
         assert_eq!(val.unbounded_shr_by_limbs_vartime(0).as_words(), &[1, 99]);
         assert_eq!(val.unbounded_shr_by_limbs_vartime(1).as_words(), &[99, 0]);
         assert_eq!(val.unbounded_shr_by_limbs_vartime(2).as_words(), &[0, 0]);

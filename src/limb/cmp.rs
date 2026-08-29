@@ -4,10 +4,10 @@ use crate::{Choice, CtAssign, CtEq, CtGt, CtLt, Limb, word};
 use core::cmp::Ordering;
 
 impl Limb {
-    /// Is this limb an odd number?
+    /// Returns the truthy value if `self` is odd or the falsy value otherwise.
     #[inline]
     #[must_use]
-    pub fn is_odd(self) -> Choice {
+    pub const fn is_odd(self) -> Choice {
         word::choice_from_lsb(self.0 & 1)
     }
 
@@ -30,6 +30,12 @@ impl Limb {
     #[inline]
     pub(crate) const fn is_nonzero(self) -> Choice {
         word::choice_from_nz(self.0)
+    }
+
+    /// Returns the true value if `self == 0` and false otherwise.
+    #[inline(always)]
+    pub(crate) const fn is_zero_vartime(self) -> bool {
+        self.0 == 0
     }
 }
 
