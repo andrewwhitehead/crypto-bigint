@@ -1,8 +1,7 @@
 //! Multiplicative inverses of integers in Montgomery form with a constant modulus.
 
 use super::{ConstMontyForm, ConstMontyParams};
-use crate::{CtOption, Invert, modular::SafeGcdInverter};
-use core::marker::PhantomData;
+use crate::{CtOption, Invert};
 
 impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstMontyForm<MOD, LIMBS> {
     /// Computes `self^-1` representing the multiplicative inverse of `self`,
@@ -23,19 +22,13 @@ impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstMontyForm<MOD, LIMBS
     /// otherwise it is the falsy value (in which case the first element's value is unspecified).
     #[must_use]
     pub const fn invert(&self) -> CtOption<Self> {
-        let inverter = SafeGcdInverter::new_with_inverse(
-            &MOD::PARAMS.modulus,
-            MOD::PARAMS.mod_inv,
-            &MOD::PARAMS.r2,
+        let m_inv = MOD::PARAMS.mod_inv.limbs[0];
+        let maybe_inverse = MOD::PARAMS.modulus.invert_mod_precomputed(
+            &self.montgomery_form,
+            m_inv,
+            Some(MOD::PARAMS.r2),
         );
-
-        let maybe_inverse = inverter.invert(&self.montgomery_form);
-
-        let ret = Self {
-            montgomery_form: maybe_inverse.to_inner_unchecked(),
-            phantom: PhantomData,
-        };
-
+        let ret = Self::from_montgomery(maybe_inverse.to_inner_unchecked());
         CtOption::new(ret, maybe_inverse.is_some())
     }
 
@@ -63,19 +56,11 @@ impl<MOD: ConstMontyParams<LIMBS>, const LIMBS: usize> ConstMontyForm<MOD, LIMBS
     /// respect to `MOD`.
     #[must_use]
     pub const fn invert_vartime(&self) -> CtOption<Self> {
-        let inverter = SafeGcdInverter::new_with_inverse(
-            &MOD::PARAMS.modulus,
-            MOD::PARAMS.mod_inv,
-            &MOD::PARAMS.r2,
-        );
-
-        let maybe_inverse = inverter.invert_vartime(&self.montgomery_form);
-
-        let ret = Self {
-            montgomery_form: maybe_inverse.to_inner_unchecked(),
-            phantom: PhantomData,
-        };
-
+        let m_inv = MOD::PARAMS.mod_inv.limbs[0];
+        let maybe_inverse = MOD::PARAMS
+            .modulus
+            .invert_mod_precomputed_vartime(&self.retrieve(), m_inv);
+        let ret = Self::new(&maybe_inverse.to_inner_unchecked());
         CtOption::new(ret, maybe_inverse.is_some())
     }
 }

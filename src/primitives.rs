@@ -66,6 +66,7 @@ pub(crate) const fn carrying_mul_add(
 
 /// `const fn` equivalent of `u32::max(a, b)`.
 #[inline]
+#[allow(unused)]
 pub(crate) const fn u32_max(a: u32, b: u32) -> u32 {
     Choice::from_u32_lt(a, b).select_u32(a, b)
 }

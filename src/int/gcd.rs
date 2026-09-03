@@ -169,7 +169,7 @@ impl<const LIMBS: usize> Odd<Int<LIMBS>> {
             mut y,
             lhs_on_gcd: abs_lhs_on_gcd,
             rhs_on_gcd: abs_rhs_on_gcd,
-        } = OddUintXgcdOutput::from_pattern_output(abs_lhs.binxgcd_nz(&abs_rhs));
+        } = abs_lhs.xgcd_unsigned(abs_rhs.as_ref());
 
         x = x.wrapping_neg_if(sgn_lhs);
         y = y.wrapping_neg_if(sgn_rhs);
@@ -208,17 +208,17 @@ pub struct XgcdOutput<const LIMBS: usize, T: Copy> {
 
 impl<const LIMBS: usize, T: Copy> XgcdOutput<LIMBS, T> {
     /// Return the `gcd`.
-    pub fn gcd(&self) -> T {
+    pub const fn gcd(&self) -> T {
         self.gcd
     }
 
     /// Return the quotients `lhs.gcd` and `rhs/gcd`.
-    pub fn quotients(&self) -> (Int<LIMBS>, Int<LIMBS>) {
+    pub const fn quotients(&self) -> (Int<LIMBS>, Int<LIMBS>) {
         (self.lhs_on_gcd, self.rhs_on_gcd)
     }
 
     /// Return the Bézout coefficients `x` and `y` s.t. `lhs * x + rhs * y = gcd`.
-    pub fn bezout_coefficients(&self) -> (Int<LIMBS>, Int<LIMBS>) {
+    pub const fn bezout_coefficients(&self) -> (Int<LIMBS>, Int<LIMBS>) {
         (self.x, self.y)
     }
 }

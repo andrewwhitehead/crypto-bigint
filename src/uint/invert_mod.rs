@@ -1,6 +1,6 @@
 use super::Uint;
 use crate::{
-    Choice, CtOption, InvertMod, Limb, NonZero, Odd, U64, UintRef, bitlen, modular::safegcd,
+    Choice, CtOption, InvertMod, Limb, NonZero, Odd, U64, UintRef, bitlen, modular::gcd,
     mul::karatsuba,
 };
 
@@ -154,7 +154,8 @@ impl<const LIMBS: usize> Uint<LIMBS> {
     /// Computes the multiplicative inverse of `self` mod `modulus`, where `modulus` is odd.
     #[must_use]
     pub const fn invert_odd_mod(&self, modulus: &Odd<Self>) -> CtOption<Self> {
-        safegcd::invert_odd_mod::<LIMBS, false>(self, modulus)
+        let mod_inv = modulus.as_uint_ref().invert_mod_limb();
+        modulus.invert_mod_precomputed(self, mod_inv, None)
     }
 
     /// Computes the multiplicative inverse of `self` mod `modulus`, where `modulus` is odd.
@@ -162,7 +163,8 @@ impl<const LIMBS: usize> Uint<LIMBS> {
     /// This method is variable-time with respect to `self`.
     #[must_use]
     pub const fn invert_odd_mod_vartime(&self, modulus: &Odd<Self>) -> CtOption<Self> {
-        safegcd::invert_odd_mod::<LIMBS, true>(self, modulus)
+        let mod_inv = modulus.as_uint_ref().invert_mod_limb();
+        modulus.invert_mod_precomputed_vartime(self, mod_inv)
     }
 
     /// Computes the multiplicative inverse of `self` mod `modulus`.
@@ -183,10 +185,11 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         // Decompose `modulus = s * 2^k` where `s` is odd
         let k = modulus.as_ref().trailing_zeros();
         let s = Odd::new_unchecked(modulus.as_ref().shr(k));
+        let m_odd_inv = s.invert_mod_precision();
 
         // Decompose `self` into RNS with moduli `2^k` and `s` and calculate the inverses.
         // Using the fact that `(z^{-1} mod (m1 * m2)) mod m1 == z^{-1} mod m1`
-        let maybe_a = self.invert_odd_mod(&s);
+        let maybe_a = s.invert_mod_precomputed(self, m_odd_inv.limbs[0], None);
 
         let maybe_b = self.invert_mod2k(k);
         let is_some = maybe_a.is_some().and(maybe_b.is_some());
@@ -200,10 +203,6 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         // self^{-1} = a mod s = b mod 2^k
         // => self^{-1} = a + s * ((b - a) * s^(-1) mod 2^k)
         // (essentially one step of the Garner's algorithm for recovery from RNS).
-
-        // `s` is odd, so this always exists
-        let m_odd_inv = s.invert_mod_precision();
-
         // This part is mod 2^k
         let t = b.wrapping_sub(&a).wrapping_mul(&m_odd_inv).restrict_bits(k);
 
@@ -252,6 +251,52 @@ impl<const LIMBS: usize> Odd<Uint<LIMBS>> {
         }
 
         inv
+    }
+
+    /// Computes the multiplicative inverse of `value` mod `self`.
+    #[inline(always)]
+    #[must_use]
+    pub(crate) const fn invert_mod_precomputed(
+        &self,
+        value: &Uint<LIMBS>,
+        self_inv: Limb,
+        monty_form_r2: Option<Uint<LIMBS>>,
+    ) -> CtOption<Uint<LIMBS>> {
+        let mut a = *value;
+        let m = self.as_uint_ref();
+        let mut buf = [[Limb::ZERO; LIMBS]; 3];
+
+        let is_some = gcd::invert_odd_mod(
+            a.as_mut_uint_ref(),
+            m,
+            self_inv,
+            UintRef::new_flattened_mut(&mut buf),
+            match monty_form_r2.as_ref() {
+                Some(u) => Some(u.as_uint_ref()),
+                None => None,
+            },
+        );
+
+        CtOption::new(a, is_some)
+    }
+
+    /// Computes the multiplicative inverse of `value` mod `self`.
+    ///
+    /// This method is variable-time with respect to `value`.
+    #[inline(always)]
+    #[must_use]
+    pub const fn invert_mod_precomputed_vartime(
+        &self,
+        value: &Uint<LIMBS>,
+        self_inv: Limb,
+    ) -> CtOption<Uint<LIMBS>> {
+        let mut a = *value;
+        let mut buf = [[Limb::ZERO; LIMBS]; 3];
+        let buf = UintRef::new_flattened_mut(&mut buf);
+
+        let res =
+            gcd::invert_odd_mod_vartime(a.as_mut_uint_ref(), self.as_uint_ref(), self_inv, buf);
+        CtOption::new(a, if res { Choice::TRUE } else { Choice::FALSE })
     }
 }
 

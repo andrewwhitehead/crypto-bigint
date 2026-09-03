@@ -6,7 +6,7 @@ impl<const LIMBS: usize> Int<LIMBS> {
     #[inline(always)]
     #[must_use]
     pub const fn resize<const T: usize>(&self) -> Int<T> {
-        let mut limbs = [Limb::select(Limb::ZERO, Limb::MAX, self.is_negative()); T];
+        let mut limbs = [Limb::choice_to_mask(self.is_negative()); T];
         let mut i = 0;
         let dim = if T < LIMBS { T } else { LIMBS };
         while i < dim {

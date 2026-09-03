@@ -18,6 +18,13 @@ impl Limb {
             Self(word::select(b.0, a.0, c)),
         );
     }
+
+    /// Return a [`Limb`] containing the mask corresponding with a [`Choice`].
+    /// This is [`Limb::MAX`] when truthy and [`Limb::ZERO`] otherwise.
+    #[inline(always)]
+    pub(crate) const fn choice_to_mask(c: Choice) -> Self {
+        Self(word::choice_to_mask(c))
+    }
 }
 
 impl CtAssign for Limb {

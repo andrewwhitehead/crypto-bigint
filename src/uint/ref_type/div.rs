@@ -579,7 +579,7 @@ impl UintRef {
         }
         let lshift = reciprocal.shift();
         let lshift_nz = Choice::from_u32_nz(lshift);
-        let lo_mask = Limb(word::choice_to_mask(lshift_nz));
+        let lo_mask = Limb::choice_to_mask(lshift_nz);
         let rshift = lshift_nz.select_u32(0, Limb::BITS - lshift);
         let mut hi = carry
             .shl(lshift)

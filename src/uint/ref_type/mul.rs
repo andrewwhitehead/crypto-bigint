@@ -26,6 +26,13 @@ impl UintRef {
         karatsuba::wrapping_mul(self, rhs, out, false)
     }
 
+    /// Compute the wrapping product of `self` and `rhs`, adding the result to `out`
+    /// and returning a carry Limb.
+    #[inline(always)]
+    pub(crate) const fn wrapping_mul_add(&self, rhs: &UintRef, out: &mut UintRef) -> Limb {
+        karatsuba::wrapping_mul(self, rhs, out, true)
+    }
+
     /// Compute the wrapping squaring of `self`, placing the result into `out` and returning
     /// a carry Limb.
     #[inline(always)]

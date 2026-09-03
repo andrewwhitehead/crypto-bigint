@@ -8,7 +8,7 @@ mod common;
 use common::to_biguint;
 use core::mem;
 use crypto_bigint::{
-    Encoding, Limb, NonZero, Odd, U256, U512, U4096, U8192, Uint, Word,
+    BitOps, Encoding, Limb, NonZero, Odd, U256, U512, U4096, U8192, Uint, Word,
     modular::{FixedMontyForm, FixedMontyParams},
 };
 use num_bigint::BigUint;
@@ -57,20 +57,51 @@ fn to_uint_xlarge(big_uint: BigUint) -> U8192 {
     U8192::from_le_slice(&input)
 }
 
+#[allow(clippy::cast_possible_truncation)]
+fn uint_limbs<const LIMBS: usize>() -> impl Strategy<Value = Uint<LIMBS>> {
+    let random = any::<[Word; LIMBS]>().prop_map(Uint::from_words);
+    let zero = Just(Uint::ZERO);
+    let single_bit = any::<u32>().prop_map(|bit| {
+        let mut res = Uint::ZERO;
+        res.set_bit_vartime(bit % Uint::<LIMBS>::BITS, true);
+        res
+    });
+    let low_bits = (any::<[Word; LIMBS]>(), any::<u32>())
+        .prop_map(|(words, bit)| Uint::from_words(words).wrapping_shr(bit));
+    let high_bits = (any::<[Word; LIMBS]>(), any::<u32>())
+        .prop_map(|(words, bit)| Uint::from_words(words).wrapping_shl(bit));
+
+    prop_oneof![
+        6 => random,
+        1 => zero,
+        2 => single_bit,
+        2 => low_bits,
+        2 => high_bits,
+    ]
+}
+
 prop_compose! {
-    fn uint()(bytes in any::<[u8; 32]>()) -> U256 {
-        U256::from_le_slice(&bytes)
+    fn uint()(val in uint_limbs()) -> U256 {
+        val
     }
 }
 prop_compose! {
-    fn odd_uint()(mut bytes in any::<[u8; 32]>()) -> Odd<U256> {
-        bytes[0] |= 1;
-        U256::from_le_slice(&bytes).to_odd().unwrap()
+    fn nonzero_uint()(mut val in uint()) -> NonZero<U256> {
+        if val.is_zero_vartime() {
+            val.set_one();
+        }
+        val.to_nz_vartime().unwrap()
     }
 }
 prop_compose! {
-    fn uint_large()(bytes in any::<[u8; 512]>()) -> U4096 {
-        U4096::from_le_slice(&bytes)
+    fn odd_uint()(mut val in uint()) -> Odd<U256> {
+        val.set_bit_vartime(0, true);
+        val.to_odd().unwrap()
+    }
+}
+prop_compose! {
+    fn uint_large()(val in uint_limbs()) -> U4096 {
+        val
     }
 }
 prop_compose! {
@@ -251,31 +282,26 @@ proptest! {
     }
 
     #[test]
-    fn wrapping_div(a in uint(), b in uint()) {
+    fn wrapping_div(a in uint(), b in nonzero_uint()) {
         let a_bi = to_biguint(&a);
-        let b_bi = to_biguint(&b);
+        let b_bi = to_biguint(b.as_ref());
 
-        if !b_bi.is_zero() {
-            let expected = to_uint(a_bi / b_bi);
-            let b_nz = NonZero::new(b).unwrap();
-            let actual = a.wrapping_div(&b_nz);
-            prop_assert_eq!(expected, actual);
-            let actual_vartime = a.wrapping_div_vartime(&b_nz);
-            prop_assert_eq!(expected, actual_vartime);
-        }
+        let expected = to_uint(a_bi / b_bi);
+        let actual = a.wrapping_div(&b);
+        prop_assert_eq!(expected, actual);
+        let actual_vartime = a.wrapping_div_vartime(&b);
+        prop_assert_eq!(expected, actual_vartime);
     }
 
     #[test]
-    fn wrapping_rem(a in uint(), b in uint()) {
+    fn wrapping_rem(a in uint(), b in nonzero_uint()) {
         let a_bi = to_biguint(&a);
-        let b_bi = to_biguint(&b);
+        let b_bi = to_biguint(b.as_ref());
 
-        if !b_bi.is_zero() {
-            let expected = to_uint(a_bi % b_bi);
-            let actual = a.wrapping_rem_vartime(&b);
+        let expected = to_uint(a_bi % b_bi);
+        let actual = a.wrapping_rem_vartime(b.as_ref());
 
-            prop_assert_eq!(expected, actual);
-        }
+        prop_assert_eq!(expected, actual);
     }
 
     #[test]
@@ -300,51 +326,42 @@ proptest! {
     }
 
     #[test]
-    fn div_rem(a in uint(), b in uint()) {
+    fn div_rem(a in uint(), b in nonzero_uint()) {
         let a_bi = to_biguint(&a);
-        let b_bi = to_biguint(&b);
+        let b_bi = to_biguint(b.as_ref());
 
-        if !b_bi.is_zero() {
-            let (q, r) = a_bi.div_rem(&b_bi);
-            let expected = (to_uint(q), to_uint(r));
-            let b_nz = NonZero::new(b).unwrap();
-            let actual = a.div_rem(&b_nz);
-            prop_assert_eq!(expected, actual);
-            let actual_vartime = a.div_rem_vartime(&b_nz);
-            prop_assert_eq!(expected, actual_vartime);
-        }
+        let (q, r) = a_bi.div_rem(&b_bi);
+        let expected = (to_uint(q), to_uint(r));
+        let actual = a.div_rem(&b);
+        prop_assert_eq!(expected, actual);
+        let actual_vartime = a.div_rem_vartime(&b);
+        prop_assert_eq!(expected, actual_vartime);
     }
 
     #[test]
-    fn div_exact(a in uint(), b in uint()) {
+    fn div_exact(a in uint(), b in nonzero_uint()) {
         let a_bi = to_biguint(&a);
-        let b_bi = to_biguint(&b);
+        let b_bi = to_biguint(b.as_ref());
 
-        if !b_bi.is_zero() {
-            let (q, r) = a_bi.div_rem(&b_bi);
-            let expected = if r.is_zero() { Some(to_uint(q)) } else { None };
-            let b_nz = NonZero::new(b).unwrap();
-            let actual = a.div_exact(&b_nz).into_option();
-            prop_assert_eq!(expected, actual);
-            let actual_vartime = a.div_exact_vartime(&b_nz).into_option();
-            prop_assert_eq!(expected, actual_vartime);
-        }
+        let (q, r) = a_bi.div_rem(&b_bi);
+        let expected = if r.is_zero() { Some(to_uint(q)) } else { None };
+        let actual = a.div_exact(&b).into_option();
+        prop_assert_eq!(expected, actual);
+        let actual_vartime = a.div_exact_vartime(&b).into_option();
+        prop_assert_eq!(expected, actual_vartime);
     }
 
     #[test]
-    fn rem_wide(a in uint(), b in uint(), c in uint()) {
+    fn rem_wide(a in uint(), b in uint(), c in nonzero_uint()) {
         let ab_bi = to_biguint(&a) * to_biguint(&b);
-        let c_bi = to_biguint(&c);
+        let c_bi = to_biguint(c.as_ref());
 
-        if !c_bi.is_zero() {
-            let expected = to_uint(ab_bi.div_rem(&c_bi).1);
-            let (lo, hi) = a.widening_mul(&b);
-            let c_nz = NonZero::new(c).unwrap();
-            let actual = Uint::rem_wide((lo, hi), &c_nz);
-            prop_assert_eq!(expected, actual);
-            let actual_vartime = Uint::rem_wide_vartime((lo, hi), &c_nz);
-            prop_assert_eq!(expected, actual_vartime);
-        }
+        let expected = to_uint(ab_bi.div_rem(&c_bi).1);
+        let (lo, hi) = a.widening_mul(&b);
+        let actual = Uint::rem_wide((lo, hi), &c);
+        prop_assert_eq!(expected, actual);
+        let actual_vartime = Uint::rem_wide_vartime((lo, hi), &c);
+        prop_assert_eq!(expected, actual_vartime);
     }
 
     #[test]
@@ -408,7 +425,7 @@ proptest! {
 
     #[test]
     fn jacobi_symbol(f in odd_uint(), g in uint()) {
-        let f_bi = to_biguint(&f);
+        let f_bi = to_biguint(f.as_ref());
         let g_bi = to_biguint(&g);
 
         let expected = g_bi.jacobi(&f_bi);
@@ -419,8 +436,7 @@ proptest! {
     }
 
     #[test]
-    fn invert_mod2k(a in uint(), k in any::<u32>()) {
-        let a = a | U256::ONE; // make odd
+    fn invert_mod2k(a in odd_uint(), k in any::<u32>()) {
         let k = k % (U256::BITS + 1);
         let a_bi = to_biguint(&a);
         let m_bi = BigUint::one() << k as usize;
@@ -440,15 +456,12 @@ proptest! {
     }
 
     #[test]
-    fn invert_mod(a in uint(), mut b in uint()) {
-        if b.is_zero().to_bool() {
-            b = Uint::ONE;
-        }
+    fn invert_mod(a in uint(), b in nonzero_uint()) {
         let a_bi = to_biguint(&a);
-        let b_bi = to_biguint(&b);
+        let b_bi = to_biguint(b.as_ref());
 
-        let expected_is_some = a_bi.gcd(&b_bi) == BigUint::one();
-        let actual = a.invert_mod(&b.to_nz().unwrap());
+        let expected_is_some = !a_bi.is_zero() && a_bi.gcd(&b_bi) == BigUint::one();
+        let actual = a.invert_mod(&b);
         let actual_is_some = bool::from(actual.is_some());
 
         prop_assert_eq!(expected_is_some, actual_is_some);
@@ -456,8 +469,31 @@ proptest! {
         if actual_is_some {
             let actual = actual.unwrap();
             let inv_bi = to_biguint(&actual);
-            let res = (inv_bi * a_bi) % b_bi;
-            prop_assert_eq!(res, BigUint::one());
+            let res = (inv_bi * a_bi) % &b_bi;
+            // For `b == 1` every residue is `0`, not `1` -- there's nothing to invert to.
+            prop_assert_eq!(res, BigUint::one() % b_bi);
+        }
+    }
+
+    #[test]
+    fn invert_odd_mod(a in uint(), b in odd_uint()) {
+        let a_bi = to_biguint(&a);
+        let b_bi = to_biguint(b.as_ref());
+
+        let expected_is_some = !a_bi.is_zero() && a_bi.gcd(&b_bi) == BigUint::one();
+        let actual = a.invert_odd_mod(&b).into_option();
+        let actual_vartime = a.invert_odd_mod_vartime(&b).into_option();
+        let actual_is_some = actual.is_some();
+
+        prop_assert_eq!(expected_is_some, actual_is_some);
+        prop_assert_eq!(actual, actual_vartime);
+
+        if actual_is_some {
+            let actual = actual.unwrap();
+            let inv_bi = to_biguint(&actual);
+            let res = (inv_bi * a_bi) % &b_bi;
+            // For `b == 1` every residue is `0`, not `1` -- there's nothing to invert to.
+            prop_assert_eq!(res, BigUint::one() % b_bi);
         }
     }
 

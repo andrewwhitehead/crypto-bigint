@@ -78,14 +78,13 @@ impl UintRef {
             (self.limbs[i], borrow) = self.limbs[i].borrowing_sub(Limb::ZERO, borrow);
             i += 1;
         }
-
         borrow.lsb_to_choice()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{Choice, Limb, UintRef, Unsigned};
+    use crate::{Choice, Limb, UintRef};
 
     #[test]
     fn borrowing_sub_assign_mixed() {

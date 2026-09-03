@@ -23,13 +23,12 @@ mod lincomb;
 mod reduction;
 
 mod add;
-pub(crate) mod bingcd;
 mod div_by_2;
+pub(crate) mod gcd;
 mod monty_params;
 mod mul;
 mod pow;
 mod prime_params;
-pub(crate) mod safegcd;
 mod sqrt;
 mod sub;
 
@@ -42,8 +41,6 @@ pub use self::{
     monty_params::{FixedMontyParams, MontyParams},
     prime_params::PrimeParams,
 };
-
-pub(crate) use self::safegcd::SafeGcdInverter;
 
 #[cfg(feature = "alloc")]
 pub use self::{boxed_monty_form::BoxedMontyForm, monty_params::boxed::BoxedMontyParams};

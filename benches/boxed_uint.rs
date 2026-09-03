@@ -7,7 +7,8 @@ use chacha20::ChaCha8Rng;
 use core::hint::black_box;
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use crypto_bigint::{
-    BoxedUint, ConcatenatingMul, ConcatenatingSquare, Gcd, Integer, Limb, NonZero, RandomBits,
+    BitOps, BoxedUint, ConcatenatingMul, ConcatenatingSquare, Gcd, Integer, Limb, NonZero,
+    RandomBits,
 };
 use num_bigint::BigUint;
 use rand_core::SeedableRng;
@@ -385,6 +386,41 @@ fn bench_gcd(c: &mut Criterion) {
     });
 }
 
+fn bench_mod_symbols(c: &mut Criterion) {
+    let mut group = c.benchmark_group("modular symbols");
+    let mut rng = ChaCha8Rng::from_seed([7u8; 32]);
+
+    group.bench_function("jacobi_symbol", |b| {
+        b.iter_batched(
+            || {
+                let (a, mut b) = (
+                    BoxedUint::random_bits(&mut rng, UINT_BITS),
+                    BoxedUint::random_bits(&mut rng, UINT_BITS),
+                );
+                b.set_bit_vartime(0, true);
+                (a, b.to_odd().unwrap())
+            },
+            |(x, y)| black_box(x.jacobi_symbol(&y)),
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("jacobi_symbol_vartime", |b| {
+        b.iter_batched(
+            || {
+                let (a, mut b) = (
+                    BoxedUint::random_bits(&mut rng, UINT_BITS),
+                    BoxedUint::random_bits(&mut rng, UINT_BITS),
+                );
+                b.set_bit_vartime(0, true);
+                (a, b.to_odd().unwrap())
+            },
+            |(x, y)| black_box(x.jacobi_symbol_vartime(&y)),
+            BatchSize::SmallInput,
+        );
+    });
+}
+
 fn bench_invert(c: &mut Criterion) {
     let mut group = c.benchmark_group("invert");
     let mut rng = ChaCha8Rng::from_seed([7u8; 32]);
@@ -402,6 +438,23 @@ fn bench_invert(c: &mut Criterion) {
                 (x, y.to_odd().unwrap())
             },
             |(x, y)| black_box(x.invert_odd_mod(&y)),
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.bench_function("invert_odd_mod_vartime", |b| {
+        b.iter_batched(
+            || {
+                let (x, mut y) = (
+                    BoxedUint::random_bits(&mut rng, UINT_BITS),
+                    BoxedUint::random_bits(&mut rng, UINT_BITS),
+                );
+                if y.is_even().into() {
+                    y = y.wrapping_add(Limb::ONE);
+                }
+                (x, y.to_odd().unwrap())
+            },
+            |(x, y)| black_box(x.invert_odd_mod_vartime(&y)),
             BatchSize::SmallInput,
         );
     });
@@ -448,6 +501,7 @@ criterion_group!(
     bench_boxed_sqrt,
     bench_radix_encoding,
     bench_gcd,
+    bench_mod_symbols,
     bench_invert,
 );
 
