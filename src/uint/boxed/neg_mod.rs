@@ -1,23 +1,16 @@
 //! [`BoxedUint`] modular negation operations.
 
-use crate::{BoxedUint, CtAssign, Limb, NegMod, NonZero};
+use crate::{BoxedUint, Limb, NegMod, NonZero};
 
 impl BoxedUint {
     /// Computes `-a mod p`.
     /// Assumes `self` is in `[0, p)`.
     #[must_use]
     pub fn neg_mod(&self, p: &NonZero<Self>) -> Self {
-        debug_assert_eq!(self.bits_precision(), p.bits_precision());
-        let is_zero = self.is_zero();
-        let mut ret = p.borrowing_sub(self, Limb::ZERO).0;
-
-        for i in 0..self.nlimbs() {
-            // Set ret to 0 if the original value was 0, in which
-            // case ret would be p.
-            ret.limbs[i].ct_assign(&Limb::ZERO, is_zero);
-        }
-
-        ret
+        let mut res = self.clone();
+        res.as_mut_uint_ref()
+            .wrapping_neg_mod_assign(p.as_uint_ref());
+        res
     }
 
     /// Computes `-a mod p` for the special modulus

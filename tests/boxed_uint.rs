@@ -8,12 +8,12 @@ mod common;
 use common::to_biguint;
 use core::ops::Range;
 use crypto_bigint::{
-    BitOps, BoxedUint, CheckedAdd, ConcatenatingMul, ConcatenatingSquare, Gcd, Integer, Limb,
-    NonZero, Odd, Resize, Word,
+    BitOps, BoxedUint, CheckedAdd, ConcatenatingMul, ConcatenatingSquare, Gcd, Limb, NonZero, Odd,
+    Resize, Word,
 };
 use num_bigint::BigUint;
 use num_integer::Integer as _;
-use num_modular::ModularUnaryOps;
+use num_modular::{ModularSymbols, ModularUnaryOps};
 use num_traits::{Zero, identities::One};
 use proptest::collection::vec as propvec;
 use proptest::prelude::*;
@@ -77,6 +77,22 @@ fn uint_limbs(limbs_range: Range<usize>) -> impl Strategy<Value = BoxedUint> {
     ]
 }
 
+/// Generate a pair of random `BoxedUint`s with mixed precision.
+fn uint_mixed_pair() -> impl Strategy<Value = (BoxedUint, BoxedUint)> {
+    let random = (uint(), uint());
+    let bit_diff = (uint(), any::<u32>()).prop_map(|(a, bit)| {
+        let mut b = a.clone();
+        let index = bit % b.bits_precision();
+        b.set_bit_vartime(index, !b.bit_vartime(index));
+        (a, b)
+    });
+
+    prop_oneof![
+        9 => random,
+        1 => bit_diff,
+    ]
+}
+
 prop_compose! {
     fn nonzero_uint()(mut val in uint()) -> NonZero<BoxedUint> {
         if val.is_zero().to_bool_vartime() {
@@ -98,6 +114,14 @@ prop_compose! {
     fn uint_pair()(a in uint(), b in uint()) -> (BoxedUint, BoxedUint) {
         let bits_precision = core::cmp::max(a.bits_precision(), b.bits_precision());
         (a.resize(bits_precision), b.resize(bits_precision))
+    }
+}
+
+prop_compose! {
+    /// Generate a pair of random `BoxedUint`s with mixed precision, and the second integer being odd.
+    fn uint_mixed_gcd_pair()((a, mut b) in uint_mixed_pair()) -> (BoxedUint, Odd<BoxedUint>) {
+        b.set_bit_vartime(0, true);
+        (a, b.to_odd().unwrap())
     }
 }
 
@@ -184,14 +208,28 @@ proptest! {
     }
 
     #[test]
-    // TODO: expand to f in uint(), g in uint()
-    fn gcd((f, g) in uint_pair()) {
+    fn gcd((f, g) in uint_mixed_pair()) {
         let f_bi = to_biguint(&f);
         let g_bi = to_biguint(&g);
 
         let expected = to_uint(f_bi.gcd(&g_bi));
         let actual = f.gcd(&g);
+        let actual_vartime = f.gcd_vartime(&g);
+        prop_assert_eq!(&expected, &actual);
+        prop_assert_eq!(&expected, &actual_vartime);
+    }
+
+    #[test]
+    fn jacobi_symbol((g, f) in uint_mixed_gcd_pair()) {
+        let f_bi = to_biguint(&f);
+        let g_bi = to_biguint(&g);
+        let f = f.to_odd().unwrap();
+
+        let expected = g_bi.jacobi(&f_bi);
+        let actual = g.jacobi_symbol(&f) as i8;
+        let actual_vartime = g.jacobi_symbol_vartime(&f) as i8;
         prop_assert_eq!(expected, actual);
+        prop_assert_eq!(expected, actual_vartime);
     }
 
     #[test]
@@ -216,26 +254,24 @@ proptest! {
     }
 
     #[test]
-    fn mod_invert((mut a, mut b) in uint_pair()) {
+    fn mod_invert((mut a, b) in uint_mixed_gcd_pair()) {
         if a.is_zero().into() {
             // we disagree on whether the inverse of zero exists
             a = BoxedUint::one_with_precision(a.bits_precision());
         }
-        if b.is_even().into() {
-            b = b.wrapping_add(Limb::ONE);
-        }
-
-        let b = b.to_odd().unwrap();
 
         let a_bi = to_biguint(&a);
         let b_bi = to_biguint(&b);
         let expected = a_bi.invm(&b_bi);
-        let actual = Option::<BoxedUint>::from(a.invert_odd_mod(&b));
+        let actual = a.invert_odd_mod(&b).into_option();
+        let actual_vartime = a.invert_odd_mod_vartime(&b).into_option();
+
+        prop_assert_eq!(&actual, &actual_vartime);
 
         match (expected, actual) {
             (Some(exp), Some(act)) => prop_assert_eq!(exp, to_biguint(&act)),
             (None, None) => (),
-            (_, _) => panic!("disagreement on if modular inverse exists")
+            (_, _) => panic!("disagreement on whether modular inverse exists")
         }
     }
 

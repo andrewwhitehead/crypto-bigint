@@ -53,8 +53,9 @@ proptest! {
 
         if let Some(actual) = Option::<U256>::from(actual) {
             let inv_bi = to_biguint(&actual);
-            let res = (inv_bi * x_bi) % m_bi;
-            prop_assert_eq!(res, BigUint::one());
+            let res = (inv_bi * x_bi) % &m_bi;
+            // For `m == 1` every residue is `0`, not `1` -- there's nothing to invert to.
+            prop_assert_eq!(res, BigUint::one() % m_bi);
 
             // check vartime implementation equivalence
             let actual_vartime = x.invert_odd_mod_vartime(&m).unwrap();

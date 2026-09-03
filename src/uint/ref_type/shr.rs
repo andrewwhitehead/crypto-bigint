@@ -161,7 +161,7 @@ impl UintRef {
     #[allow(clippy::integer_division_remainder_used, reason = "vartime")]
     pub const fn unbounded_shr_assign_vartime(&mut self, shift: u32) {
         if shift >= self.bits_precision() {
-            self.conditional_set_zero(Choice::TRUE);
+            self.fill(Limb::ZERO);
             return;
         }
 
@@ -211,6 +211,7 @@ impl UintRef {
     /// # Panics
     /// - if `shift >= Limb::BITS`.
     #[inline(always)]
+    #[track_caller]
     pub(crate) const fn conditional_shr_assign_limb_nonzero(
         &mut self,
         shift: NonZeroU32,
@@ -252,6 +253,7 @@ impl UintRef {
     /// # Panics
     /// - if `shift >= Limb::BITS`.
     #[inline(always)]
+    #[track_caller]
     pub(crate) const fn shr_assign_limb_with_carry(&mut self, shift: u32, carry: Limb) -> Limb {
         let nz = Choice::from_u32_nz(shift);
         self.conditional_shr_assign_limb_nonzero(

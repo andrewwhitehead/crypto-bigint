@@ -40,22 +40,24 @@ impl UintRef {
 
     /// Perform in-place wrapping subtraction, returning the truthy value as the second element of
     /// the tuple if an underflow has occurred.
-    pub(crate) fn conditional_borrowing_sub_assign(
+    pub(crate) const fn conditional_borrowing_sub_assign(
         &mut self,
         rhs: &Self,
         choice: Choice,
     ) -> Choice {
         debug_assert!(self.bits_precision() <= rhs.bits_precision());
-        let mask = Limb::select(Limb::ZERO, Limb::MAX, choice);
+        let mask = Limb::choice_to_mask(choice);
         let mut borrow = Limb::ZERO;
-
-        for i in 0..self.nlimbs() {
-            let masked_rhs = *rhs.limbs.get(i).unwrap_or(&Limb::ZERO) & mask;
-            let (limb, b) = self.limbs[i].borrowing_sub(masked_rhs, borrow);
-            self.limbs[i] = limb;
-            borrow = b;
+        let mut i = 0;
+        while i < rhs.nlimbs() {
+            let masked_rhs = rhs.limbs[i].bitand(mask);
+            (self.limbs[i], borrow) = self.limbs[i].borrowing_sub(masked_rhs, borrow);
+            i += 1;
         }
-
+        while i < self.nlimbs() {
+            (self.limbs[i], borrow) = self.limbs[i].borrowing_sub(Limb::ZERO, borrow);
+            i += 1;
+        }
         borrow.lsb_to_choice()
     }
 }

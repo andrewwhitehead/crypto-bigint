@@ -40,7 +40,7 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         choice: Choice,
     ) -> (Self, Choice) {
         let mut limbs = [Limb::ZERO; LIMBS];
-        let mask = Limb::select(Limb::ZERO, Limb::MAX, choice);
+        let mask = Limb::choice_to_mask(choice);
         let mut borrow = Limb::ZERO;
 
         let mut i = 0;

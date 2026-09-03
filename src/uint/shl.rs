@@ -116,21 +116,6 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         res
     }
 
-    /// Computes `self << (shift * Limb::BITS)` in a panic-free manner, returning zero if the
-    /// shift exceeds the precision.
-    ///
-    /// NOTE: this operation is variable time with respect to `shift` *ONLY*.
-    ///
-    /// When used with a fixed `shift`, this function is constant-time with respect to `self`.
-    #[inline(always)]
-    #[must_use]
-    pub(crate) const fn unbounded_shl_by_limbs_vartime(&self, shift: u32) -> Self {
-        let mut res = *self;
-        res.as_mut_uint_ref()
-            .unbounded_shl_assign_by_limbs_vartime(shift);
-        res
-    }
-
     /// Computes `self << shift` where `shift < shift_upper_bound`.
     ///
     /// The runtime is determined by `shift_upper_bound` which may be larger or smaller than
@@ -380,14 +365,6 @@ mod tests {
     #[test]
     fn shl_wide_max_max_256() {
         assert!(Uint::overflowing_shl_vartime_wide((U128::MAX, U128::MAX), 256).is_none());
-    }
-
-    #[test]
-    fn shl_by_limbs() {
-        let val = Uint::<2>::from_words([1, 99]);
-        assert_eq!(val.unbounded_shl_by_limbs_vartime(0).as_words(), &[1, 99]);
-        assert_eq!(val.unbounded_shl_by_limbs_vartime(1).as_words(), &[0, 1]);
-        assert_eq!(val.unbounded_shl_by_limbs_vartime(2).as_words(), &[0, 0]);
     }
 
     #[test]

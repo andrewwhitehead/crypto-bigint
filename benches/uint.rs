@@ -656,58 +656,6 @@ fn gcd_bench<const LIMBS: usize>(g: &mut BenchmarkGroup<WallTime>, _x: Uint<LIMB
             BatchSize::SmallInput,
         );
     });
-
-    g.bench_function(BenchmarkId::new("bingcd", LIMBS), |b| {
-        b.iter_batched(
-            || {
-                (
-                    OddUint::<LIMBS>::random_from_rng(&mut rng),
-                    Uint::<LIMBS>::random_from_rng(&mut rng),
-                )
-            },
-            |(f, g)| black_box(f.bingcd(&g)),
-            BatchSize::SmallInput,
-        );
-    });
-
-    g.bench_function(BenchmarkId::new("bingcd_vartime", LIMBS), |b| {
-        b.iter_batched(
-            || {
-                (
-                    OddUint::<LIMBS>::random_from_rng(&mut rng),
-                    Uint::<LIMBS>::random_from_rng(&mut rng),
-                )
-            },
-            |(f, g)| black_box(f.bingcd_vartime(&g)),
-            BatchSize::SmallInput,
-        );
-    });
-
-    g.bench_function(BenchmarkId::new("safegcd", LIMBS), |b| {
-        b.iter_batched(
-            || {
-                (
-                    OddUint::<LIMBS>::random_from_rng(&mut rng),
-                    Uint::<LIMBS>::random_from_rng(&mut rng),
-                )
-            },
-            |(f, g)| black_box(f.safegcd(&g)),
-            BatchSize::SmallInput,
-        );
-    });
-
-    g.bench_function(BenchmarkId::new("safegcd_vartime", LIMBS), |b| {
-        b.iter_batched(
-            || {
-                (
-                    OddUint::<LIMBS>::random_from_rng(&mut rng),
-                    Uint::<LIMBS>::random_from_rng(&mut rng),
-                )
-            },
-            |(f, g)| black_box(f.safegcd_vartime(&g)),
-            BatchSize::SmallInput,
-        );
-    });
 }
 
 fn bench_gcd(c: &mut Criterion) {
@@ -715,6 +663,7 @@ fn bench_gcd(c: &mut Criterion) {
 
     gcd_bench(&mut group, Uint::<1>::ZERO);
     gcd_bench(&mut group, Uint::<2>::ZERO);
+    gcd_bench(&mut group, Uint::<3>::ZERO);
     gcd_bench(&mut group, Uint::<4>::ZERO);
     gcd_bench(&mut group, Uint::<8>::ZERO);
     gcd_bench(&mut group, Uint::<64>::ZERO);
@@ -738,6 +687,19 @@ fn xgcd_bench<const LIMBS: usize>(g: &mut BenchmarkGroup<WallTime>, _x: Uint<LIM
             BatchSize::SmallInput,
         );
     });
+
+    g.bench_function(BenchmarkId::new("xgcd_vartime", LIMBS), |b| {
+        b.iter_batched(
+            || {
+                (
+                    Uint::<LIMBS>::random_from_rng(&mut rng),
+                    Uint::<LIMBS>::random_from_rng(&mut rng),
+                )
+            },
+            |(f, g)| black_box(Uint::xgcd_vartime(&f, &g)),
+            BatchSize::SmallInput,
+        );
+    });
 }
 
 fn bench_xgcd(c: &mut Criterion) {
@@ -747,14 +709,8 @@ fn bench_xgcd(c: &mut Criterion) {
     xgcd_bench(&mut group, Uint::<2>::ZERO);
     xgcd_bench(&mut group, Uint::<3>::ZERO);
     xgcd_bench(&mut group, Uint::<4>::ZERO);
-    xgcd_bench(&mut group, Uint::<5>::ZERO);
-    xgcd_bench(&mut group, Uint::<6>::ZERO);
-    xgcd_bench(&mut group, Uint::<7>::ZERO);
     xgcd_bench(&mut group, Uint::<8>::ZERO);
-    xgcd_bench(&mut group, Uint::<16>::ZERO);
-    xgcd_bench(&mut group, Uint::<32>::ZERO);
     xgcd_bench(&mut group, Uint::<64>::ZERO);
-    xgcd_bench(&mut group, Uint::<128>::ZERO);
     xgcd_bench(&mut group, Uint::<256>::ZERO);
 
     group.finish();

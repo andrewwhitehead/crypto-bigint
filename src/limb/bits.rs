@@ -1,4 +1,4 @@
-use crate::{BitOps, Choice, Word};
+use crate::{BitOps, Choice};
 
 use super::Limb;
 
@@ -7,10 +7,7 @@ impl Limb {
     /// Returns the falsy value for indices out of range.
     #[must_use]
     pub const fn bit(self, index: u32) -> Choice {
-        let index_in_limb = index & (Limb::BITS - 1);
-        self.shr(index_in_limb)
-            .lsb_to_choice()
-            .and(Choice::from_u32_eq(index, index_in_limb))
+        self.unbounded_shr(index).lsb_to_choice()
     }
 
     /// Returns `true` if the bit at position `index` is set, `false` for an unset bit
@@ -30,7 +27,7 @@ impl Limb {
 
     /// Sets the bit at `index` to 0 or 1 depending on the value of `bit_value`.
     #[inline(always)]
-    fn set_bit(self, index: u32, bit_value: Choice) -> Self {
+    pub(crate) const fn set_bit(self, index: u32, bit_value: Choice) -> Self {
         let mask = Limb::ONE.shl(index);
         Limb::select(self.bitand(mask.not()), self.bitor(mask), bit_value)
     }
@@ -38,7 +35,7 @@ impl Limb {
     /// Sets the bit at `index` to 0 or 1 depending on the value of `bit_value`, in variable-time
     /// with respect to `index`.
     #[inline(always)]
-    fn set_bit_vartime(self, index: u32, bit_value: bool) -> Self {
+    const fn set_bit_vartime(self, index: u32, bit_value: bool) -> Self {
         if bit_value {
             self.bitor(Limb::ONE.shl(index))
         } else {
@@ -60,6 +57,13 @@ impl Limb {
         self.0.leading_zeros()
     }
 
+    /// Calculate the number of leading ones in the binary representation of this number.
+    #[inline(always)]
+    #[must_use]
+    pub const fn leading_ones(self) -> u32 {
+        self.0.leading_ones()
+    }
+
     /// Calculate the number of trailing zeros in the binary representation of this number.
     #[inline(always)]
     #[must_use]
@@ -75,10 +79,10 @@ impl Limb {
     }
 
     /// Clear bits at or above the given bit position.
+    #[inline(always)]
     #[must_use]
     pub const fn restrict_bits(self, len: u32) -> Self {
-        #[allow(trivial_numeric_casts)]
-        self.bitand(Limb((1 as Word).overflowing_shl(len).0 - 1))
+        self.bitand(Limb::MAX.unbounded_shl(len).not())
     }
 }
 

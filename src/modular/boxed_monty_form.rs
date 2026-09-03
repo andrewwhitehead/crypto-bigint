@@ -5,6 +5,7 @@ mod ct;
 mod from;
 mod invert;
 mod lincomb;
+mod mod_symbol;
 mod mul;
 mod neg;
 mod pow;
