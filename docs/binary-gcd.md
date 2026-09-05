@@ -59,7 +59,7 @@ packed number that also holds `al`". That buys two things.
 **More steps per batch.** A `W`-bit glued register is a `2k`-bit register with
 `k = W/2`, so Pornin's own bound caps it at `k − 1 = 31` steps. Here the low
 bits and the high approximation no longer compete for one register's budget, so
-a batch can run `GCD_BATCH_SIZE = 58` steps at `W = 64` — roughly double. The
+a batch can run `SPLIT_BATCH_SIZE = 58` steps at `W = 64` — roughly double. The
 price is that the high word is no longer tied to the operand's true value by
 the packed representation's own exactness, so it can drift out of sync over
 those extra steps. Bounding that drift is what §2 is about, and the batch
@@ -124,11 +124,11 @@ batch size determine each other and are solved together in §4:
 |---|---|---|---|---|
 | `T` | 23 | 12 | 7 | 5 |
 | `SPLIT_THRESHOLD_BITS` | 5 | 4 | 3 | 3 |
-| `GCD_BATCH_SIZE` | 58 | 27 | 12 | 4 |
+| `SPLIT_BATCH_SIZE` | 58 | 27 | 12 | 4 |
 
 Both paths read the same scheduled extraction over deferred-sign operands
 (§3), so one drift bound serves both and the table has no per-path column:
-`T(S) = ⌈(3S + 25)/9⌉`, and `GCD_BATCH_SIZE = W − SPLIT_THRESHOLD_BITS − 1` at
+`T(S) = ⌈(3S + 25)/9⌉`, and `SPLIT_BATCH_SIZE = W − SPLIT_THRESHOLD_BITS − 1` at
 every word size.
 
 The batch length is one step below the longest the drift bound would certify.
@@ -285,7 +285,7 @@ the rest of the operand.
 
 That trick is scoped to Stage 1. The transition into Stage 2 performs the one
 genuine full-width negation `b` ever needs; from there
-`GcdPair::gcd_small_with_budget` extracts with the exact, unsigned
+`GcdPair::gcd_small` extracts with the exact, unsigned
 `GcdPair::extract_compact_pair` and re-corrects both operands to non-negative every round via
 `wrapping_apply_unsigned_shift` — cheap, because that window is capped at
 `SMALL_THRESHOLD_LIMBS` (8) limbs rather than `N`. Past that point neither the
@@ -366,7 +366,7 @@ For operands `a`, `b` at the start of a batch, write
 ```
 
 where `E` is the reference position of §3's schedule — `S` above the tracked
-`extract_pos`, which the round decrements by `S/2` in `gcd_odd_with_budget`,
+`extract_pos`, which the round decrements by `S/2` in `GcdPair::gcd`,
 tracked in half-bits so that an odd `S` stays exact (§3) — so
 `E_i = N − (S/2)·i`, and `E_i` may land on a half-bit. Primes mark
 post-batch quantities throughout, so `E' = E − S/2` and `ΔΦ = Φ − Φ'`.

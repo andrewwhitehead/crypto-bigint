@@ -1,4 +1,6 @@
-use super::{CofactorPair, ExtendedIntRef, GCD_BATCH_SIZE, SMALL_THRESHOLD_LIMBS, bingcd};
+use super::{
+    CofactorPair, ExtendedIntRef, SMALL_THRESHOLD_LIMBS, SPLIT_BATCH_SIZE, WORD_BATCH_SIZE, bingcd,
+};
 use crate::{Choice, Limb, Uint, UintRef, Word, primitives::u32_min, word};
 
 /// The running state of a binary GCD reduction.
@@ -11,26 +13,39 @@ pub struct GcdPair<'a> {
     /// Current width (in limbs) of the `a`/`b` tracking window; starts at `a.nlimbs()` and only ever
     /// shrinks.
     len: usize,
+    /// Current number of elementary steps still owed, which shrinks by the size of each batch applied.
+    k_remain: u32,
 }
 
 impl<'a> GcdPair<'a> {
-    /// Starts tracking `a`, `b` at their full width.
+    /// Starts tracking `a`, `b` at their full width, with the step budget Pornin's Phi bound
+    /// requires for operands of that width.
     pub const fn new(a: &'a mut UintRef, b: &'a mut UintRef) -> Self {
+        let k_remain = bingcd::iterations(a.bits_precision());
+        Self::new_with_budget(a, b, k_remain)
+    }
+
+    /// [`Self::new`] with the step budget supplied rather than derived: the caller must have
+    /// `bitlen(a), bitlen(b) <= k_remain` (Pornin's Phi bound).
+    pub const fn new_with_budget(a: &'a mut UintRef, b: &'a mut UintRef, k_remain: u32) -> Self {
         let len = a.nlimbs();
         assert!(b.nlimbs() == len, "a and b must have the same width");
         assert!(b.limbs[0].0 & 1 == 1, "b must be odd");
-        Self { a, b, len }
+        Self {
+            a,
+            b,
+            len,
+            k_remain,
+        }
     }
 }
 
 impl GcdPair<'_> {
     /// Reduces `a`/`b` down to their gcd using a deferred-sign reduction loop with a scheduled
-    /// high word extraction before handing off to [`Self::gcd_small_with_budget`] once the
+    /// high word extraction before handing off to [`Self::gcd_small`] once the
     /// tracked window narrows to `SMALL_THRESHOLD_LIMBS`.
     ///
-    /// Inputs:
-    /// - `total_steps` is the step budget: the caller must have
-    ///   `bitlen(a), bitlen(b) <= total_steps` (Pornin's Phi bound).
+    /// Spends the step budget `self.k_remain`, leaving it at zero.
     ///
     /// Outputs:
     /// - `b` receives `gcd(a, b)` and `a` is left zeroed.
@@ -40,33 +55,32 @@ impl GcdPair<'_> {
     /// Each round reads a top-bit-aligned magnitude window of `a`/`b` via
     /// [`Self::scheduled_extract_compact_pair`] (deferred sign -- `a`/`b` are tracked as
     /// two's-complement values across rounds for efficiency),
-    /// turns it into a `GCD_BATCH_SIZE`-step matrix via [`bingcd::partial_xgcd`], and applies
+    /// turns it into a `SPLIT_BATCH_SIZE`-step matrix via [`bingcd::partial_xgcd`], and applies
     /// it to the inputs. Once the window size drops to the small size threshold, the inputs
-    /// are renormalized to non-negative, then [`Self::gcd_small_with_budget`] takes over
+    /// are renormalized to non-negative, then [`Self::gcd_small`] takes over
     /// using an exact (non-scheduled) extraction.
     ///
     /// The extraction position walks a schedule that starts one batch's worth of bits below full
     /// width and falls by half of whatever's been consumed so far every round unconditionally.
     #[inline(always)]
     #[allow(clippy::cast_possible_truncation)]
-    pub const fn gcd_with_budget<const JACOBI: bool>(&mut self, total_steps: u32) -> Word {
+    pub const fn gcd<const JACOBI: bool>(&mut self) -> Word {
         let mut jacobi_neg = 0;
-        let mut k_remain = total_steps;
         let mut window_shrink_at = (self.len as u32 - 1) << Limb::LOG2_BITS;
-        let mut extract_pos = (self.b.bits_precision() - Limb::BITS) << 1;
-
         let (mut a_hi, mut b_hi) = (Limb::ZERO, Limb::ZERO);
         let mut b_true_limbs = self.len;
 
         // Stage 1 batches: extract according the fixed schedule, build the transition matrix, apply it to
         // `(a, b)` and update the schedule.
         while self.len > SMALL_THRESHOLD_LIMBS {
+            self.k_remain -= SPLIT_BATCH_SIZE;
+            let extract_pos = (self.k_remain + 1) >> 1;
+
             let (a_neg, b_neg) = (a_hi.bit(Limb::HI_BIT), b_hi.bit(Limb::HI_BIT));
-            let (a_, b_, _shift) =
-                self.scheduled_extract_compact_pair(a_neg, b_neg, extract_pos >> 1);
+            let (a_, b_, _shift) = self.scheduled_extract_compact_pair(a_neg, b_neg, extract_pos);
 
             let (matrix, j_neg, unhalted) =
-                bingcd::partial_xgcd::<JACOBI>(a_, b_, Choice::FALSE, GCD_BATCH_SIZE);
+                bingcd::partial_xgcd::<JACOBI>(a_, b_, Choice::FALSE, SPLIT_BATCH_SIZE);
             let (mut a_ext, mut b_ext) = (
                 ExtendedIntRef::new(self.a.leading_mut(self.len), a_hi),
                 ExtendedIntRef::new(self.b.leading_mut(self.len), b_hi),
@@ -91,12 +105,10 @@ impl GcdPair<'_> {
                 jacobi_neg ^= g_neg & (self.b.limbs[0].0 >> 1);
             }
 
-            k_remain -= matrix.k;
-            if k_remain <= window_shrink_at {
+            if self.k_remain <= window_shrink_at {
                 self.len -= 1;
                 window_shrink_at -= Limb::BITS;
             }
-            extract_pos -= GCD_BATCH_SIZE;
 
             let a_nonzero = self.a.limbs[0].is_nonzero();
             b_true_limbs = a_nonzero.select_u32(b_true_limbs as u32, self.len as u32) as usize;
@@ -127,39 +139,36 @@ impl GcdPair<'_> {
             }
         }
 
-        // Pass off to perform the final reduction for `k_remain` steps, updating `a` and `b` in place
-        jacobi_neg ^= self.gcd_small_with_budget::<JACOBI>(k_remain);
+        // Pass off to perform the final reduction for the remaining budget, updating `a` and `b` in place
+        jacobi_neg ^= self.gcd_small::<JACOBI>();
 
         jacobi_neg
     }
 
     /// Reduces `a`/`b` down to their gcd using the exact, non-deferred-sign counterpart of
-    /// [`Self::gcd_with_budget`]'s reduction loop, then hands off to
-    /// [`Self::gcd_tiny_with_budget`] once the tracked window narrows to 2 limbs.
+    /// [`Self::gcd`]'s reduction loop, then hands off to
+    /// [`Self::gcd_tiny`] once the tracked window narrows to 2 limbs.
     ///
-    /// Inputs:
-    /// - `total_steps` is the step budget: the caller must have
-    ///   `bitlen(a), bitlen(b) <= total_steps` (Pornin's Phi bound).
+    /// Spends the step budget `self.k_remain`, leaving it at zero.
     ///
     /// Outputs:
     /// - `b` receives `gcd(a, b)` and `a` is left zeroed.
     ///
-    /// The batched matrix reduction operates on `a`/`b` a `GCD_BATCH_SIZE`-step matrix at a
-    /// time, narrowing `self.len` via the same `window_shrink_at` formula
-    /// [`Self::gcd_with_budget`] uses for its own reduction loop, until it reaches 2 limbs.
-    /// The reduction of the final limbs is delegated to [`Self::gcd_tiny_with_budget`].
+    /// The batched matrix reduction operates on `a`/`b` a `SPLIT_BATCH_SIZE`-step matrix at a
+    /// time, narrowing `self.len` via the same `window_shrink_at` formula [`Self::gcd`] uses for
+    /// its own reduction loop, until it reaches 2 limbs. The reduction of the final limbs is
+    /// delegated to [`Self::gcd_tiny`].
     #[inline(always)]
     #[allow(clippy::cast_possible_truncation)]
-    pub const fn gcd_small_with_budget<const JACOBI: bool>(&mut self, total_steps: u32) -> Word {
+    pub const fn gcd_small<const JACOBI: bool>(&mut self) -> Word {
         let mut jacobi_neg = 0;
-        let mut k_remain = total_steps;
         let mut window_shrink_at = (self.len as u32 - 1) << Limb::LOG2_BITS;
 
         // Stage 1: batched matrix reduction down to a 2-limb window.
         while self.len > 2 {
             let (a_, b_, exact) = self.extract_compact_pair();
             let (matrix, j_neg, unhalted) =
-                bingcd::partial_xgcd::<JACOBI>(a_, b_, exact, GCD_BATCH_SIZE);
+                bingcd::partial_xgcd::<JACOBI>(a_, b_, exact, SPLIT_BATCH_SIZE);
             let (a_neg, b_neg) = matrix.wrapping_apply_unsigned_shift(
                 self.a.leading_mut(self.len),
                 self.b.leading_mut(self.len),
@@ -178,41 +187,40 @@ impl GcdPair<'_> {
                 jacobi_neg ^= word::choice_to_mask(a_neg) & (self.b.limbs[0].0 >> 1);
             }
 
-            k_remain -= matrix.k;
-            if k_remain <= window_shrink_at {
+            self.k_remain -= SPLIT_BATCH_SIZE;
+            if self.k_remain <= window_shrink_at {
                 self.len -= 1;
                 window_shrink_at -= Limb::BITS;
             }
         }
 
-        // Pass off to perform the final reduction for `k_remain` steps, updating `a` and `b` in place
-        jacobi_neg ^= self.gcd_tiny_with_budget(k_remain);
+        // Pass off to perform the final reduction for the remaining budget, updating `a` and `b` in place
+        jacobi_neg ^= self.gcd_tiny();
 
         jacobi_neg
     }
 
-    /// Finishes an in-progress [`Self::gcd_small_with_budget`] run in one register-only call,
+    /// Finishes an in-progress [`Self::gcd_small`] run in one register-only call,
     /// once the schedule-derived operand ceiling (`self.len`) has fallen to at most two
     /// limbs.
     ///
     /// Writes the gcd back into `b`'s low limb(s) and zeros `a`; returns the accumulated
     /// quadratic-reciprocity sign for the finished portion.
     #[inline(always)]
-    const fn gcd_tiny_with_budget(&mut self, total_steps: u32) -> Word {
+    const fn gcd_tiny(&mut self) -> Word {
         assert!(self.len <= 2, "exceeded maximum input size");
         let mut jacobi_neg = 0;
-        let mut k_remain = total_steps;
 
         // Perform `WideWord` elementary steps until `remaining_steps` proves a single `Word` suffices.
         if self.len == 2 {
             let (a2, b2) = (self.a.leading_mut(2), self.b.leading_mut(2));
             let mut a = a2.to_wide_word_unchecked();
             let mut b = b2.to_wide_word_unchecked();
-            while k_remain > Limb::BITS {
+            while self.k_remain > Limb::BITS {
                 let j_neg;
                 ((a, b), _, _, j_neg) = bingcd::step_wide_word(a, b);
                 jacobi_neg ^= j_neg;
-                k_remain -= 1;
+                self.k_remain -= 1;
             }
             a2.set_from_wide_word(a);
             b2.set_from_wide_word(b);
@@ -220,13 +228,10 @@ impl GcdPair<'_> {
 
         // Single-`Word` finish for the remaining reduction steps.
         let (mut a, mut b) = (self.a.limbs[0].0, self.b.limbs[0].0);
-        while k_remain != 0 {
-            let j_neg;
-            ((a, b), _, _, j_neg) = bingcd::step_word(a, b);
-            jacobi_neg ^= j_neg;
-            k_remain -= 1;
+        while self.k_remain != 0 {
+            ((a, b), _, _, jacobi_neg) = bingcd::step_word(a, b, jacobi_neg);
+            self.k_remain -= 1;
         }
-        self.a.limbs[0] = Limb::ZERO;
         self.b.limbs[0] = Limb(b);
 
         jacobi_neg
@@ -234,7 +239,7 @@ impl GcdPair<'_> {
 
     /// Core signed extended-gcd engine shared by `xgcd_odd` and `invert_odd_mod`: reduces `b` (a
     /// copy of `cofactors.y`) and `a` down to their gcd using
-    /// [`Self::gcd_with_budget`]'s binary-GCD method (magnitude-comparison-based batched
+    /// [`Self::gcd`]'s binary-GCD method (magnitude-comparison-based batched
     /// matrices, deferred sign), applying the identical sequence of step matrices to a
     /// caller-supplied [`CofactorPair`] alongside `(a, b)`.
     ///
@@ -249,33 +254,23 @@ impl GcdPair<'_> {
     ///
     /// # Approach
     ///
-    /// Two stages, matching [`Self::gcd_with_budget`]'s own split:
+    /// Two stages, matching [`Self::gcd`]'s own split:
     ///
     /// Stage 1 (`self.len > SMALL_THRESHOLD_LIMBS`) is the deferred-sign loop. Each batch extracts
     /// a top-bit-aligned magnitude window of `a`/`b` via [`Self::scheduled_extract_compact_pair`],
     /// walking an unconditionally-moving schedule position. It them turns the extraction into a
-    /// `GCD_BATCH_SIZE`-step [`bingcd::BingcdMatrix`] via [`bingcd::partial_xgcd`], and applies it
+    /// `SPLIT_BATCH_SIZE`-step [`bingcd::BingcdMatrix`] via [`bingcd::partial_xgcd`], and applies it
     /// to `(a, b)`. `(u, v)` are updated by the same column-sign-adjusted matrix (captured as
     /// `a_neg`/`b_neg` before that update changes `a`/`b`'s own sign).
     ///
-    /// Stage 2 (`self.len <= SMALL_THRESHOLD_LIMBS`) switches to the same exact, non-deferred-sign
-    /// extraction [`Self::gcd_small_with_budget`]'s own Stage 1 uses -- [`Self::extract_compact_pair`]
-    /// plus the unsigned `wrapping_apply_shift_unsigned` -- instead of continuing Stage 1's
-    /// tracked-position `scheduled_extract_compact_pair` down to a 1-limb window. Unlike
-    /// `gcd_small_with_budget`'s own tail, Stage 2 here still needs a *matrix* every round to
-    /// keep `(u, v)` updated, so it runs a single loop down to convergence, reading off the low
-    /// limbs directly and switching to [`bingcd::partial_xgcd_word`] once `k_remain` has dropped
-    /// sufficiently.
+    /// Stage 2 (`self.len <= SMALL_THRESHOLD_LIMBS`) is [`Self::raw_xgcd_small`],
+    /// handed whatever step budget Stage 1 left.
     #[inline(always)]
     #[allow(clippy::cast_possible_truncation)]
     pub const fn raw_xgcd(&mut self, cofactors: &mut CofactorPair<'_>) {
         assert!(cofactors.u.nlimbs() >= self.len);
 
-        let n = self.a.bits_precision();
-        let total_steps = bingcd::iterations(n);
-        let mut k_remain = total_steps;
         let mut window_shrink_at = (self.len as u32 - 1) << Limb::LOG2_BITS;
-        let mut extract_pos = (n - Limb::BITS) << 1;
 
         let (mut a_hi, mut b_hi) = (Limb::ZERO, Limb::ZERO);
         let mut b_true_limbs = self.len;
@@ -283,11 +278,12 @@ impl GcdPair<'_> {
         // Stage 1 batches: extract, build the transition matrix, apply it to `(a, b)` and
         // `(u, v)`, and update the schedule.
         while self.len > SMALL_THRESHOLD_LIMBS {
+            self.k_remain -= SPLIT_BATCH_SIZE;
             let (a_neg, b_neg) = (a_hi.bit(Limb::HI_BIT), b_hi.bit(Limb::HI_BIT));
-            let (a_, b_, _shift) =
-                self.scheduled_extract_compact_pair(a_neg, b_neg, extract_pos >> 1);
+            let extract_pos = (self.k_remain + 1) >> 1;
+            let (a_, b_, _shift) = self.scheduled_extract_compact_pair(a_neg, b_neg, extract_pos);
             let (matrix, _jacobi_neg, _unhalted) =
-                bingcd::partial_xgcd::<false>(a_, b_, Choice::FALSE, GCD_BATCH_SIZE);
+                bingcd::partial_xgcd::<false>(a_, b_, Choice::FALSE, SPLIT_BATCH_SIZE);
             let (mut a_ext, mut b_ext) = (
                 ExtendedIntRef::new(self.a.leading_mut(self.len), a_hi),
                 ExtendedIntRef::new(self.b.leading_mut(self.len), b_hi),
@@ -297,12 +293,10 @@ impl GcdPair<'_> {
 
             cofactors.apply_matrix(matrix.column_signed_limb_matrix(a_neg, b_neg), matrix.k);
 
-            k_remain -= matrix.k;
-            if k_remain <= window_shrink_at {
+            if self.k_remain <= window_shrink_at {
                 self.len -= 1;
                 window_shrink_at -= Limb::BITS;
             }
-            extract_pos -= GCD_BATCH_SIZE;
 
             let a_nonzero = self.a.limbs[0].is_nonzero();
             b_true_limbs = a_nonzero.select_u32(b_true_limbs as u32, self.len as u32) as usize;
@@ -335,38 +329,64 @@ impl GcdPair<'_> {
             }
         }
 
-        // Stage 2 (`self.len <= SMALL_THRESHOLD_LIMBS`): matching `gcd_small_with_budget`'s own Stage 1.
-        // `(a, b)` stay non-negative throughout (every round's `wrapping_apply_shift_unsigned` unconditionally
-        // re-corrects both) but `(u, v)`'s own update still needs the *row*-sign adjustment
-        // `wrapping_apply_shift_unsigned` itself reports back (`a_negated`, `b_negated`).
-        while k_remain != 0 {
-            let matrix = if self.len > 1 {
-                let (a_, b_, exact) = self.extract_compact_pair();
-                bingcd::partial_xgcd::<false>(a_, b_, exact, GCD_BATCH_SIZE).0
-            } else {
-                let batch_size = if k_remain > GCD_BATCH_SIZE {
-                    GCD_BATCH_SIZE
-                } else {
-                    k_remain
-                };
-                bingcd::partial_xgcd_word(self.a.limbs[0].0, self.b.limbs[0].0, batch_size).0
-            };
+        // Pass off to perform the final reduction for the remaining budget, updating `(a, b)` and
+        // `(u, v)` in place.
+        self.raw_xgcd_small(cofactors);
+    }
+
+    /// [`Self::raw_xgcd`]'s Stage 2, split out so that the pair mirrors the way
+    /// [`Self::gcd`] hands off to [`Self::gcd_small`]: the exact,
+    /// non-deferred-sign counterpart of that method's own reduction loop, carrying a
+    /// [`CofactorPair`] alongside `(a, b)`.
+    ///
+    /// Inputs:
+    /// - `self.k_remain` is the step budget left to spend -- whatever [`Self::raw_xgcd`]'s Stage 1
+    ///   did not consume, which is the whole budget when Stage 1 never ran at all.
+    /// - `(a, b)` must already be non-negative, which is what Stage 1's transition guarantees and
+    ///   what the exact extraction below relies on.
+    ///
+    /// Outputs:
+    /// - `self.b` receives `gcd(self.a, cofactors.y)`.
+    /// - `cofactors.v` ends up satisfying `v * a ≡ gcd(a, b) (mod y)`; call
+    ///   [`CofactorPair::finalize`] to reduce it into `[0, y)`.
+    ///
+    /// `window_shrink_at` is re-derived from `self.len` rather than threaded in: Stage 1 pairs
+    /// every `self.len -= 1` with a `Limb::BITS` decrement, so `(self.len - 1) * Limb::BITS` is
+    /// exactly the value it would have handed over.
+    ///
+    /// `(a, b)` stay non-negative throughout (every round's `wrapping_apply_unsigned_shift`
+    /// unconditionally re-corrects both) but `(u, v)`'s own update still needs the *row*-sign
+    /// adjustment that call reports back (`a_negated`, `b_negated`).
+    #[inline(always)]
+    #[allow(clippy::cast_possible_truncation)]
+    pub const fn raw_xgcd_small(&mut self, cofactors: &mut CofactorPair<'_>) {
+        let mut window_shrink_at = (self.len as u32 - 1) << Limb::LOG2_BITS;
+
+        while self.k_remain > WORD_BATCH_SIZE {
+            let (a_, b_, exact) = self.extract_compact_pair();
+            let (matrix, _jneg, _unhalted) =
+                bingcd::partial_xgcd::<false>(a_, b_, exact, SPLIT_BATCH_SIZE);
 
             let (a_negated, b_negated) = matrix.wrapping_apply_unsigned_shift(
                 self.a.leading_mut(self.len),
                 self.b.leading_mut(self.len),
             );
-            cofactors.apply_matrix(
-                matrix.row_signed_limb_matrix(a_negated, b_negated),
-                matrix.k,
-            );
+            let signed = matrix.row_signed_limb_matrix(a_negated, b_negated);
 
-            k_remain -= matrix.k;
-            if self.len != 1 && k_remain <= window_shrink_at {
+            self.k_remain -= matrix.k;
+            cofactors.apply_matrix(signed, matrix.k);
+
+            if self.len != 1 && self.k_remain <= window_shrink_at {
                 self.len -= 1;
                 window_shrink_at -= Limb::BITS;
             }
         }
+
+        let (b, matrix, _) =
+            bingcd::partial_xgcd_word(self.a.limbs[0].0, self.b.limbs[0].0, self.k_remain);
+        self.b.limbs[0] = Limb(b);
+        self.k_remain = 0;
+        cofactors.half_apply_matrix(matrix.signed_limb_matrix(), matrix.k);
     }
 
     /// Perform a single low-to-high scan latching the `(prev, cur)` limb pair of `a`, `b`

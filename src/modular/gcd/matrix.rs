@@ -62,13 +62,6 @@ impl SignedLimbMatrix {
         self.r0.1.sign = self.r0.1.sign.not();
     }
 
-    /// Flips the sign of both entries in the bottom row, without touching their magnitudes.
-    #[inline(always)]
-    pub const fn negate_bottom_row(&mut self) {
-        self.r1.0.sign = self.r1.0.sign.not();
-        self.r1.1.sign = self.r1.1.sign.not();
-    }
-
     /// Applies the same linear transform as [`Self::wrapping_apply`], but to *unsigned* operands
     /// (`a`, `b` are plain, non-negative `UintRef`s here, not signed `ExtendedIntRef`s) for
     /// callers that already keep their own sign bookkeeping outside the matrix machinery and would
@@ -206,6 +199,60 @@ impl SignedLimbMatrix {
         let (b_hi_new, _) = a_hi
             .bitxor(m10_mask)
             .carrying_mul_add(m10, term_b1_hi, carry[2]);
+        b.hi = b_hi_new;
+    }
+
+    /// [`Self::wrapping_apply`]'s bottom row alone: computes `b = r1.0*a + r1.1*b`, reading `a`
+    /// without updating it.
+    ///
+    /// For the last batch of a reduction whose caller only reads `b` afterwards -- `raw_xgcd`'s
+    /// cofactor pair, where [`CofactorPair::finalize`][super::CofactorPair::finalize] reduces `v`
+    /// alone and never looks at `u` again. `a` is still *read*, since the row it feeds is the one
+    /// being kept, so it must arrive as correctly scaled and as bounded as a full apply would need
+    /// it; what is skipped is computing the new `a`, which is exactly half the multiply-accumulate
+    /// work of [`Self::wrapping_apply`].
+    #[inline(always)]
+    pub const fn wrapping_half_apply(
+        &self,
+        a_lo: &UintRef,
+        a_hi: Limb,
+        b: &mut ExtendedIntRef<'_>,
+    ) {
+        let b_hi = b.hi;
+        let (a_lo, b_lo) = (&a_lo.limbs, &mut b.lo.limbs);
+        assert!(a_lo.len() == b_lo.len());
+
+        // The bottom-row half of `wrapping_apply`'s loop, term for term: each limb's `b`-term is
+        // computed first and handed to the `a`-term's `carrying_mul_add` as its addend, so the two
+        // land pre-summed and the `a`-side carry doubles as the row's sum-carry.
+        let r1 = self.r1;
+        let (m10, m11) = (r1.0.value, r1.1.value);
+        let (m10_mask, m11_mask) = (
+            Limb::choice_to_mask(r1.0.sign),
+            Limb::choice_to_mask(r1.1.sign),
+        );
+        let mut carry = [m10_mask.bitand(m10), m11_mask.bitand(m11)];
+        let mut i = 0;
+
+        while i < a_lo.len() {
+            let term_b1;
+            (term_b1, carry[1]) =
+                b_lo[i]
+                    .bitxor(m11_mask)
+                    .carrying_mul_add(m11, Limb::ZERO, carry[1]);
+            (b_lo[i], carry[0]) = a_lo[i]
+                .bitxor(m10_mask)
+                .carrying_mul_add(m10, term_b1, carry[0]);
+            i += 1;
+        }
+
+        let term_b1_hi = b_hi
+            .bitxor(m11_mask)
+            .wrapping_mul(m11)
+            .wrapping_add(carry[1]);
+        let (b_hi_new, _) = a_hi
+            .bitxor(m10_mask)
+            .carrying_mul_add(m10, term_b1_hi, carry[0]);
         b.hi = b_hi_new;
     }
 }
