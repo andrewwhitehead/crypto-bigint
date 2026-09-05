@@ -265,17 +265,28 @@ impl<const LIMBS: usize> Odd<Uint<LIMBS>> {
         let mut a = *value;
         let m = self.as_uint_ref();
         let mut buf = [[Limb::ZERO; LIMBS]; 3];
+        let r2 = match monty_form_r2.as_ref() {
+            Some(u) => Some(u.as_uint_ref()),
+            None => None,
+        };
 
-        let is_some = gcd::invert_odd_mod(
-            a.as_mut_uint_ref(),
-            m,
-            self_inv,
-            UintRef::new_flattened_mut(&mut buf),
-            match monty_form_r2.as_ref() {
-                Some(u) => Some(u.as_uint_ref()),
-                None => None,
-            },
-        );
+        let is_some = if const { LIMBS <= gcd::SMALL_THRESHOLD_LIMBS } {
+            gcd::invert_odd_mod_small(
+                a.as_mut_uint_ref(),
+                m,
+                self_inv,
+                UintRef::new_flattened_mut(&mut buf),
+                r2,
+            )
+        } else {
+            gcd::invert_odd_mod(
+                a.as_mut_uint_ref(),
+                m,
+                self_inv,
+                UintRef::new_flattened_mut(&mut buf),
+                r2,
+            )
+        };
 
         CtOption::new(a, is_some)
     }

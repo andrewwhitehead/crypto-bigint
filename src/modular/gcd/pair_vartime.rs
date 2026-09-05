@@ -1,4 +1,4 @@
-use super::{CofactorPair, ExtendedIntRef, GCD_BATCH_SIZE, SignedLimbMatrix, bingcd};
+use super::{CofactorPair, ExtendedIntRef, SPLIT_BATCH_SIZE, SignedLimbMatrix, bingcd};
 use crate::{JacobiSymbol, Limb, UintRef, Word};
 
 /// The running state of a vartime binary GCD reduction.
@@ -46,7 +46,7 @@ impl GcdPairVartime<'_> {
                 break;
             }
 
-            self.reduce_bingcd(GCD_BATCH_SIZE);
+            self.reduce_bingcd(SPLIT_BATCH_SIZE);
         }
     }
 
@@ -72,7 +72,7 @@ impl GcdPairVartime<'_> {
                 break;
             }
 
-            let (_, _, j) = self.reduce_bingcd(GCD_BATCH_SIZE);
+            let (_, _, j) = self.reduce_bingcd(SPLIT_BATCH_SIZE);
             jacobi_neg ^= j;
         }
 
@@ -97,16 +97,25 @@ impl GcdPairVartime<'_> {
     /// that path doesn't produce a matrix for `cofactors` to consume.
     #[inline(always)]
     pub const fn raw_xgcd<'a>(&mut self, cofactors: &mut CofactorPair<'a>) {
-        let init_k = self.strip_trailing_zeros();
+        // 'u' is zero at this point, so a left shift would do nothing.
+        cofactors.defer_k(self.strip_trailing_zeros());
 
-        while self.a_bits != 0 {
+        loop {
             self.truncate();
 
-            let (m, mk, _) = self.reduce_bingcd(GCD_BATCH_SIZE);
+            let (m, mk, _) = self.reduce_bingcd(SPLIT_BATCH_SIZE);
+
+            if self.a_bits == 0 {
+                // `reduce_bingcd` just drove `a` to zero, so this is the last round: `u`'s new
+                // value is dead, since `finalize` reads only `v`.
+                cofactors.half_apply_matrix_vartime(m, mk);
+                break;
+            }
+
             cofactors.apply_matrix_vartime(m, mk);
         }
 
-        cofactors.defer_k(init_k);
+        // FIXME - better handling of single limb reduction
     }
 
     /// Runs one batched round of `max_batch` (or fewer, if the top-window comparison stops being
@@ -133,40 +142,39 @@ impl GcdPairVartime<'_> {
     #[allow(clippy::cast_possible_truncation)]
     const fn reduce_bingcd(&mut self, max_batch: u32) -> (SignedLimbMatrix, u32, Word) {
         let (a_, b_) = self.extract_pair();
-        let (m, j_neg1) = bingcd::partial_xgcd_vartime(a_, b_, max_batch, self.len == 1);
-        let (m2, j_neg2) = self.apply_matrix(m);
-        (m2, m.k, j_neg1 ^ j_neg2)
+        let (m, j_neg) = bingcd::partial_xgcd_vartime(a_, b_, max_batch, self.len == 1);
+        let (m2, j_neg) = self.apply_matrix(m, j_neg);
+        (m2, m.k, j_neg)
     }
 
     #[inline(always)]
     #[allow(clippy::cast_possible_truncation)]
-    const fn apply_matrix(&mut self, matrix: bingcd::BingcdMatrix) -> (SignedLimbMatrix, Word) {
-        let mut jacobi_neg = 0;
-
+    const fn apply_matrix(
+        &mut self,
+        matrix: bingcd::BingcdMatrix,
+        mut jacobi_neg: Word,
+    ) -> (SignedLimbMatrix, Word) {
         let (a, b) = (self.a.leading_mut(self.len), self.b.leading_mut(self.len));
         let mut m2 = matrix.signed_limb_matrix();
-        let (mut ae, mut be) = (
+        let (mut a_ext, mut b_ext) = (
             ExtendedIntRef::new(a, Limb::ZERO),
             ExtendedIntRef::new(b, Limb::ZERO),
         );
-        m2.wrapping_apply(&mut ae, &mut be);
+        m2.wrapping_apply(&mut a_ext, &mut b_ext);
 
-        if be.is_negative_vartime() {
-            m2.negate_bottom_row();
-            be.wrapping_neg_assign();
-        }
-        be.shr_assign_limb_unsigned(matrix.k);
-        be.unsigned_drop_extension();
+        debug_assert!(!b_ext.is_negative_vartime(), "b should not go negative");
+        b_ext.shr_assign_limb_unsigned(matrix.k);
+        b_ext.unsigned_drop_extension();
         let b_lo = b.limbs[0];
         debug_assert!(b_lo.0 & 1 == 1, "b must be odd");
 
-        if ae.is_negative_vartime() {
+        if a_ext.is_negative_vartime() {
             m2.negate_top_row();
-            ae.wrapping_neg_assign();
+            a_ext.wrapping_neg_assign();
             jacobi_neg ^= b_lo.0 >> 1;
         }
-        ae.shr_assign_limb_unsigned(matrix.k);
-        ae.unsigned_drop_extension();
+        a_ext.shr_assign_limb_unsigned(matrix.k);
+        a_ext.unsigned_drop_extension();
 
         self.a_bits = a.bits_vartime();
 
@@ -204,9 +212,14 @@ impl GcdPairVartime<'_> {
         } else {
             let a = self.a.leading_mut(self.len);
             let tz = a.trailing_zeros_vartime();
-            a.unbounded_shr_assign_vartime(tz);
-            self.a_bits -= tz;
-            tz
+            // avoid the relatively expensive shift for little payoff
+            if tz >= Word::BITS >> 2 {
+                a.unbounded_shr_assign_vartime(tz);
+                self.a_bits -= tz;
+                tz
+            } else {
+                0
+            }
         }
     }
 

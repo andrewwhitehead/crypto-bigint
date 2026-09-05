@@ -16,7 +16,11 @@ pub(super) use self::{
 };
 
 /// Maximum number of elementary binary GCD steps [`partial_xgcd`] performs per batch.
-pub(super) const GCD_BATCH_SIZE: u32 = Word::BITS - SPLIT_THRESHOLD_BITS - 1;
+pub(super) const SPLIT_BATCH_SIZE: u32 = Word::BITS - SPLIT_THRESHOLD_BITS - 1;
+
+/// Maximum batch length for [`bingcd::partial_xgcd_word`] -- the tail's single-word branch, where
+/// the tracked operands fit one limb.
+const WORD_BATCH_SIZE: u32 = Word::BITS - 2;
 
 /// Ambiguity band for [`partial_xgcd`]'s `HALT = true` divergence check.
 const SPLIT_THRESHOLD_BITS: u32 = match cpubits::CPUBITS {
@@ -33,24 +37,22 @@ pub const SMALL_THRESHOLD_LIMBS: usize = 8;
 /// Calculates the greatest common denominator of `a` and odd `b`, using the optimized
 /// batched Binary GCD algorithm.
 ///
-/// Thin wrapper around [`GcdPair::gcd_odd_with_budget`], always deriving its step budget
+/// Thin wrapper around [`GcdPair::gcd`], always deriving its step budget
 /// from `b`'s own width.
 pub const fn gcd_odd(a: &mut UintRef, b: &mut UintRef) {
-    let total_steps = bingcd::iterations(b.bits_precision());
     let mut pair = GcdPair::new(a, b);
-    pair.gcd_with_budget::<false>(total_steps);
+    pair.gcd::<false>();
 }
 
 /// Calculates the greatest common denominator of `a` and odd `b`, using the optimized
 /// batched Binary GCD algorithm.
 ///
-/// Thin wrapper around [`GcdPair::gcd_small_with_budget`], always deriving its step
+/// Thin wrapper around [`GcdPair::gcd_small`], always deriving its step
 /// budget from `b`'s own width.
 #[inline(always)]
 pub const fn gcd_odd_small(a: &mut UintRef, b: &mut UintRef) {
-    let total_steps = bingcd::iterations(b.bits_precision());
     let mut pair = GcdPair::new(a, b);
-    pair.gcd_small_with_budget::<false>(total_steps);
+    pair.gcd_small::<false>();
 }
 
 /// Computes `gcd(a, b)`, leaving it in whichever of `a`/`b` the returned `bool` names (`true` for
@@ -87,7 +89,7 @@ pub const fn gcd_vartime(a: &mut UintRef, b: &mut UintRef) -> bool {
 
 /// Computes the Jacobi symbol `(a|b)` for odd `b`, specialized for small operands.
 ///
-/// Uses [`GcdPair::gcd_small_with_budget`]'s small-width reduction loop directly, skipping
+/// Uses [`GcdPair::gcd_small`]'s small-width reduction loop directly, skipping
 /// the deferred-sign Stage 1 loop [`jacobi_symbol`] uses for wider operands.
 ///
 /// Inputs:
@@ -103,14 +105,13 @@ pub const fn gcd_vartime(a: &mut UintRef, b: &mut UintRef) -> bool {
 /// If `a` and `b` are not the same width or `b` is not odd.
 #[inline(always)]
 pub const fn jacobi_symbol_small(a: &mut UintRef, b: &mut UintRef) -> JacobiSymbol {
-    let total_steps = bingcd::iterations(a.bits_precision());
     let mut pair = GcdPair::new(a, b);
-    let jacobi_neg = pair.gcd_small_with_budget::<true>(total_steps);
+    let jacobi_neg = pair.gcd_small::<true>();
     JacobiSymbol::from_sign(jacobi_neg & 1).zero_if(b.is_one().not())
 }
 
 /// Computes the Jacobi symbol `(a|b)` for odd `b`, using the full deferred-sign
-/// [`GcdPair::gcd_with_budget`] reduction loop.
+/// [`GcdPair::gcd`] reduction loop.
 ///
 /// Inputs:
 /// - `a`, `b`: same width (`nlimbs`); `b` must be odd.
@@ -124,9 +125,8 @@ pub const fn jacobi_symbol_small(a: &mut UintRef, b: &mut UintRef) -> JacobiSymb
 /// # Panics
 /// If `a` and `b` are not the same width or `b` is not odd.
 pub const fn jacobi_symbol(a: &mut UintRef, b: &mut UintRef) -> JacobiSymbol {
-    let total_steps = bingcd::iterations(a.bits_precision());
     let mut pair = GcdPair::new(a, b);
-    let jacobi_neg = pair.gcd_with_budget::<true>(total_steps);
+    let jacobi_neg = pair.gcd::<true>();
     JacobiSymbol::from_sign(jacobi_neg & 1).zero_if(b.is_one().not())
 }
 
@@ -162,7 +162,6 @@ pub const fn jacobi_symbol_vartime(a: &mut UintRef, b: &mut UintRef) -> JacobiSy
 /// Outputs:
 /// - Returns a `Choice` that is true iff `x` is invertible mod `y` (`gcd(x, y) == 1 && x != 0`).
 /// - `x` holds `x^-1 mod y` when the returned `Choice` is true, otherwise its state is unspecified.
-#[inline(always)]
 pub const fn invert_odd_mod<'a>(
     x: &'a mut UintRef,
     y: &'a Odd<UintRef>,
@@ -182,6 +181,47 @@ pub const fn invert_odd_mod<'a>(
     let mut cofactors = CofactorPair::new(u, v, y, y_inv, monty_form_r2);
 
     pair.raw_xgcd(&mut cofactors);
+
+    let inv = cofactors.finalize_vartime();
+    x.copy_from(inv);
+
+    gcd.is_one().and(x_nonzero)
+}
+
+/// [`invert_odd_mod`]'s counterpart for operands no wider than [`SMALL_THRESHOLD_LIMBS`], where
+/// [`GcdPair::raw_xgcd`]'s Stage 1 cannot execute a single batch -- its loop is
+/// `while self.len > SMALL_THRESHOLD_LIMBS` -- and its renormalizing transition is skipped for
+/// the same reason, `(a, b)` still being the non-negative values they started as. Going straight
+/// to [`GcdPair::raw_xgcd_small`] drops both from the inlined body rather than
+/// emitting them behind a branch that is never taken, the same way [`gcd_odd_small`] stands to
+/// [`gcd_odd`].
+///
+/// Inputs, outputs and preconditions are [`invert_odd_mod`]'s, plus: `x` must be no wider than
+/// [`SMALL_THRESHOLD_LIMBS`] limbs. Wider operands would still compute the right answer -- the
+/// exact extraction handles any width -- but would pay it in extraction cost, having skipped the
+/// scheduled stage that exists to avoid exactly that.
+#[inline(always)]
+pub const fn invert_odd_mod_small<'a>(
+    x: &'a mut UintRef,
+    y: &'a Odd<UintRef>,
+    y_inv: Limb,
+    buf: &'a mut UintRef,
+    monty_form_r2: Option<&UintRef>,
+) -> Choice {
+    debug_assert!(x.nlimbs() <= SMALL_THRESHOLD_LIMBS);
+
+    let x_nonzero = x.is_nonzero();
+    let limbs = x.nlimbs();
+
+    let (gcd, buf) = buf.split_at_mut(limbs);
+    gcd.copy_from(y.as_ref());
+    let mut pair = GcdPair::new(x, gcd);
+
+    let (u, buf) = buf.split_at_mut(limbs);
+    let v = buf.leading_mut(limbs);
+    let mut cofactors = CofactorPair::new(u, v, y, y_inv, monty_form_r2);
+
+    pair.raw_xgcd_small(&mut cofactors);
 
     let inv = cofactors.finalize_vartime();
     x.copy_from(inv);

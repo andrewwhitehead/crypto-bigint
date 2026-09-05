@@ -15,6 +15,9 @@ pub struct CofactorPair<'a> {
     pub len: usize,
     /// Power-of-two divisor (mod `y`) owed to `u`/`v` but not yet applied.
     pub k: u32,
+    /// The part of that divisor accumulated *before* the window filled, split out from [`Self::k`]
+    /// and never paid during the loop -- see [`Self::apply_matrix`].
+    pub k_deferred: u32,
     /// Constant-time-only growth-schedule state: bits of headroom left in the live window's own
     /// spare `hi` limb before another limb must be pulled in.
     pub cap_remain: u32,
@@ -70,6 +73,7 @@ impl<'a> CofactorPair<'a> {
             v_hi: Limb::ZERO,
             len,
             k: 0,
+            k_deferred: 0,
             cap_remain: Limb::BITS - 1,
             y,
             y_inv,
@@ -94,11 +98,15 @@ impl<'a> CofactorPair<'a> {
         } else {
             target
         };
+        let (u_sgn, v_sgn) = (
+            self.u_hi.shr(Limb::HI_BIT).wrapping_neg(),
+            self.v_hi.shr(Limb::HI_BIT).wrapping_neg(),
+        );
         while self.len < target {
             self.u.limbs[self.len] = self.u_hi;
-            self.u_hi = self.u_hi.shr(Limb::HI_BIT).wrapping_neg();
+            self.u_hi = u_sgn;
             self.v.limbs[self.len] = self.v_hi;
-            self.v_hi = self.v_hi.shr(Limb::HI_BIT).wrapping_neg();
+            self.v_hi = v_sgn;
             self.len += 1;
         }
     }
@@ -116,6 +124,46 @@ impl<'a> CofactorPair<'a> {
         self.k += k;
     }
 
+    /// [`Self::wrapping_apply_matrix`]'s `v`-only counterpart: updates `v` from `(u, v)` and
+    /// leaves `u` holding whatever it held before.
+    #[inline(always)]
+    const fn wrapping_half_apply_matrix(&mut self, m: SignedLimbMatrix, k: u32) {
+        let mut v = ExtendedIntRef::new(self.v.leading_mut(self.len), self.v_hi);
+        m.wrapping_half_apply(self.u.leading(self.len), self.u_hi, &mut v);
+        self.v_hi = v.hi;
+        self.k += k;
+    }
+
+    /// [`Self::apply_matrix`]'s counterpart for the caller's *last* round, where `u`'s own new
+    /// value is dead on arrival: [`Self::finalize`] reduces and returns `v` alone, so nothing ever
+    /// reads `u` again. Pays off the pending shift and grows the window exactly as
+    /// [`Self::apply_matrix`] does -- `u` is still an input to `v`'s row, so it has to be as
+    /// reduced and as bounded here as it would be for a full apply -- then applies the bottom row
+    /// only, halving the round's multiply-accumulate work.
+    ///
+    /// Leaves `u` stale. Correct only as the final call on this [`CofactorPair`]; a subsequent
+    /// [`Self::apply_matrix`] would fold that stale `u` back into `v`.
+    #[inline(always)]
+    pub const fn half_apply_matrix(&mut self, m: SignedLimbMatrix, k: u32) {
+        self.reduce_k();
+        if !self.is_full() {
+            let growth = k + 1;
+            if growth <= self.cap_remain {
+                self.cap_remain -= growth;
+            } else {
+                self.grow_to(self.len + 1);
+                self.cap_remain = self.cap_remain + Limb::BITS - growth;
+            }
+            if self.is_full() {
+                // The window just filled. Everything owed up to here is retired to `k_deferred`
+                // and never paid on `u` at all -- see this method's doc.
+                self.k_deferred += self.k;
+                self.k = 0;
+            }
+        }
+        self.wrapping_half_apply_matrix(m, k);
+    }
+
     /// Conditionally apply any pending modular division by `2^k` to both `u` and `v`. Called at
     /// the *start* of [`Self::apply_matrix`], reducing whatever was left pending by the previous
     /// round -- so the last round the caller's loop ever makes leaves its own shift untouched
@@ -125,6 +173,25 @@ impl<'a> CofactorPair<'a> {
     /// No-op while the tracked window can still grow (`len < u.nlimbs()`): there's no need to pay
     /// for a mod-`y` reduction as long as overflow can simply be absorbed by widening the window
     /// instead.
+    ///
+    /// While there is a backlog to borrow against ([`Self::k_deferred`]), this divides by `k + 1`
+    /// rather than `k` and skips [`ExtendedIntRef::try_reduce_mod`] entirely. The extra halving is
+    /// what the correction was there for. Writing `M` for the bound on `|u|`, `|v|` just before a
+    /// round's reduction, and using the row bound `||r||_1 <= 2^k`:
+    ///
+    /// ```text
+    ///     by k, then try_reduce_mod:   M -> 2^k * (M/2^k     + y - y) = M              (stationary)
+    ///     by k + 1, no correction:     M -> 2^k * (M/2^(k+1) + y)     = M/2 + 2^k * y  (contracting)
+    /// ```
+    ///
+    /// The contraction's fixed point, `2^(k+1) * y`, is the same bound the stationary form sits
+    /// at, so this needs no headroom the current schedule does not already have, and `M` is
+    /// non-increasing rather than merely held in place. The borrowed bit is subtracted from
+    /// `k_deferred` so the total owed is unchanged -- one per post-full round, against a backlog
+    /// of thousands.
+    ///
+    /// With no backlog (the `monty_form_r2` seeding, whose window starts full) there is nothing to
+    /// borrow, and the correction is applied as before.
     #[inline(always)]
     const fn reduce_k(&mut self) {
         if self.is_full() && self.k != 0 {
@@ -132,17 +199,28 @@ impl<'a> CofactorPair<'a> {
                 ExtendedIntRef::new(self.u, self.u_hi),
                 ExtendedIntRef::new(self.v, self.v_hi),
             );
-            u.div2k_mod_assign_vartime(self.y, self.y_inv, self.k);
-            u.try_reduce_mod(self.y.as_nz_ref());
+            let borrow = self.k_deferred != 0;
+            let k = if borrow {
+                self.k_deferred -= 1;
+                self.k + 1
+            } else {
+                self.k
+            };
+            u.div2k_mod_assign_vartime(self.y, self.y_inv, k);
+            v.div2k_mod_assign_vartime(self.y, self.y_inv, k);
+            if !borrow {
+                u.try_reduce_mod(self.y.as_nz_ref());
+                v.try_reduce_mod(self.y.as_nz_ref());
+            }
             self.u_hi = u.hi;
-            v.div2k_mod_assign_vartime(self.y, self.y_inv, self.k);
-            v.try_reduce_mod(self.y.as_nz_ref());
             self.v_hi = v.hi;
             self.k = 0;
         }
     }
 
-    /// Vartime equivalent of [`Self::reduce_k`].
+    /// Vartime equivalent of [`Self::reduce_k`], including its borrow-one contraction: the
+    /// bound argument there is on magnitudes and the row norm, neither of which depends on
+    /// whether the schedule that produced the matrix was data-independent.
     #[inline(always)]
     const fn reduce_k_vartime(&mut self) {
         if self.is_full() && self.k != 0 {
@@ -150,12 +228,21 @@ impl<'a> CofactorPair<'a> {
                 ExtendedIntRef::new(self.u, self.u_hi),
                 ExtendedIntRef::new(self.v, self.v_hi),
             );
-            u.div2k_mod_assign_vartime(self.y, self.y_inv, self.k);
-            u.try_reduce_mod_vartime(self.y.as_nz_ref());
-            self.u_hi = u.hi;
-            v.div2k_mod_assign_vartime(self.y, self.y_inv, self.k);
-            v.try_reduce_mod_vartime(self.y.as_nz_ref());
-            self.v_hi = v.hi;
+            if self.k_deferred != 0 {
+                let k = self.k + 1;
+                u.div2k_mod_assign_vartime(self.y, self.y_inv, k);
+                self.u_hi = u.hi;
+                v.div2k_mod_assign_vartime(self.y, self.y_inv, k);
+                self.v_hi = v.hi;
+                self.k_deferred -= 1;
+            } else {
+                u.div2k_mod_assign_vartime(self.y, self.y_inv, self.k);
+                u.try_reduce_mod_vartime(self.y.as_nz_ref());
+                self.u_hi = u.hi;
+                v.div2k_mod_assign_vartime(self.y, self.y_inv, self.k);
+                v.try_reduce_mod_vartime(self.y.as_nz_ref());
+                self.v_hi = v.hi;
+            }
             self.k = 0;
         }
     }
@@ -173,6 +260,16 @@ impl<'a> CofactorPair<'a> {
     /// this round's own worst-case growth won't fit and there's still room to grow into, and
     /// finally applies the matrix -- leaving *this* round's own shift pending in turn, for the
     /// next call (or, if this was the last one, for [`Self::finalize`]) to deal with.
+    ///
+    /// The pending shift is split in two at the moment the window fills. Everything owed up to
+    /// that point moves to [`Self::k_deferred`] and is never paid during the loop at all; only
+    /// what accumulates afterwards is paid per round, which is all that keeping `u`/`v` bounded
+    /// requires. The growth schedule caps them at roughly `2^bits(y)` when the window fills --
+    /// the window is sized to hold exactly that -- so the backlog division would only change
+    /// their representation, not their magnitude, and the per-round `k` alone holds the steady
+    /// state (each round multiplies by at most `2^(k+1)` and divides by `2^k`, and
+    /// `try_reduce_mod`'s single correction absorbs the remainder). Deferring it costs `u`'s
+    /// copy of that division nothing, because [`Self::finalize`] pays the backlog on `v` alone.
     #[inline(always)]
     pub const fn apply_matrix(&mut self, m: SignedLimbMatrix, k: u32) {
         self.reduce_k();
@@ -184,6 +281,12 @@ impl<'a> CofactorPair<'a> {
                 self.grow_to(self.len + 1);
                 self.cap_remain = self.cap_remain + Limb::BITS - growth;
             }
+            if self.is_full() {
+                // The window just filled. Everything owed up to here is retired to `k_deferred`
+                // and never paid on `u` at all -- see this method's doc.
+                self.k_deferred += self.k;
+                self.k = 0;
+            }
         }
         self.wrapping_apply_matrix(m, k);
     }
@@ -193,14 +296,37 @@ impl<'a> CofactorPair<'a> {
     /// grows the window by one limb only if `(u, v)` actually overflowed it this round --
     /// measured directly from their own data via [`Self::overflow_vartime`], rather than guessed
     /// from a schedule.
+    ///
+    /// Retires the growth-phase backlog to [`Self::k_deferred`] on the round that fills the
+    /// window, exactly as [`Self::apply_matrix`] does -- the transition is just detected from the
+    /// overflow-driven growth rather than from the schedule, and has to be latched before the
+    /// growth so that later rounds, which find the window already full, do not keep retiring
+    /// their own `k` and never reduce at all.
     #[inline(always)]
     pub const fn apply_matrix_vartime(&mut self, m: SignedLimbMatrix, k: u32) {
         self.reduce_k_vartime();
+        let growing = !self.is_full();
         self.wrapping_apply_matrix(m, k);
         let overflow = self.overflow_vartime();
         if overflow != 0 {
             self.grow_to(self.len + 1);
         }
+        if growing && self.is_full() {
+            self.k_deferred += self.k;
+            self.k = 0;
+        }
+    }
+
+    /// [`Self::apply_matrix_vartime`]'s counterpart for the caller's last round, standing to it as
+    /// [`Self::half_apply_matrix`] stands to [`Self::apply_matrix`]: `u`'s new value is never read,
+    /// so only `v`'s row is computed. The window is not grown afterwards either -- growth exists to
+    /// keep the *next* round's inputs in range, and there is no next round.
+    ///
+    /// Leaves `u` stale, so this must be the final call on this [`CofactorPair`].
+    #[inline(always)]
+    pub const fn half_apply_matrix_vartime(&mut self, m: SignedLimbMatrix, k: u32) {
+        self.reduce_k_vartime();
+        self.wrapping_half_apply_matrix(m, k);
     }
 
     /// Folds an extra pending shift `k` into the tracked total directly, without applying any
@@ -208,7 +334,7 @@ impl<'a> CofactorPair<'a> {
     /// outside the normal per-round matrix-apply loop.
     #[inline(always)]
     pub const fn defer_k(&mut self, k: u32) {
-        self.k += k;
+        self.k_deferred += k;
     }
 
     /// Grows to full width (flushing any limbs never touched) and reduces any pending `k` --
@@ -218,9 +344,11 @@ impl<'a> CofactorPair<'a> {
     #[inline(always)]
     const fn reduce_v(&mut self) {
         self.grow_to(self.u.nlimbs());
-        if self.k != 0 {
+        // The growth-phase backlog rides along to here and is paid once, on `v` only.
+        let k = self.k + self.k_deferred;
+        if k != 0 {
             let mut v = ExtendedIntRef::new(self.v, self.v_hi);
-            v.div2k_mod_assign_vartime(self.y, self.y_inv, self.k);
+            v.div2k_mod_assign_vartime(self.y, self.y_inv, k);
             v.try_reduce_mod(self.y.as_nz_ref());
             self.v_hi = v.hi;
         }
@@ -230,9 +358,11 @@ impl<'a> CofactorPair<'a> {
     #[inline(always)]
     const fn reduce_v_vartime(&mut self) {
         self.grow_to(self.u.nlimbs());
-        if self.k != 0 {
+        // The growth-phase backlog rides along to here and is paid once, on `v` only.
+        let k = self.k + self.k_deferred;
+        if k != 0 {
             let mut v = ExtendedIntRef::new(self.v, self.v_hi);
-            v.div2k_mod_assign_vartime(self.y, self.y_inv, self.k);
+            v.div2k_mod_assign_vartime(self.y, self.y_inv, k);
             v.try_reduce_mod_vartime(self.y.as_nz_ref());
             self.v_hi = v.hi;
         }
@@ -242,7 +372,6 @@ impl<'a> CofactorPair<'a> {
     /// whatever value `u` tracks the same linear combination of.
     #[inline(always)]
     pub const fn negate_u_if(&mut self, cond: Choice) {
-        debug_assert!(self.is_full());
         let mut u = ExtendedIntRef::new(self.u, self.u_hi);
         u.conditional_carrying_neg_assign(cond);
         self.u_hi = u.hi;
@@ -251,7 +380,6 @@ impl<'a> CofactorPair<'a> {
     /// [`Self::negate_u_if`]'s counterpart for `v`.
     #[inline(always)]
     pub const fn negate_v_if(&mut self, cond: Choice) {
-        debug_assert!(self.is_full());
         let mut v = ExtendedIntRef::new(self.v, self.v_hi);
         v.conditional_carrying_neg_assign(cond);
         self.v_hi = v.hi;
