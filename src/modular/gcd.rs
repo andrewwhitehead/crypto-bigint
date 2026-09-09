@@ -156,8 +156,6 @@ pub const fn jacobi_symbol_vartime(a: &mut UintRef, b: &mut UintRef) -> JacobiSy
 /// - `y`: odd modulus.
 /// - `y_inv`: `y`'s limb-sized modular inverse, as returned by `Odd<UintRef>::invert_mod_limb`.
 /// - `buf`: scratch, at least `3 * x.nlimbs()` limbs.
-/// - `monty_form_r2`: seeds [`CofactorPair`]'s `u` coefficient with a Montgomery `R^2` instead of
-///   the plain-inverse default of `1` -- see `invert_mod_precomputed`.
 ///
 /// Outputs:
 /// - Returns a `Choice` that is true iff `x` is invertible mod `y` (`gcd(x, y) == 1 && x != 0`).
@@ -167,7 +165,6 @@ pub const fn invert_odd_mod<'a>(
     y: &'a Odd<UintRef>,
     y_inv: Limb,
     buf: &'a mut UintRef,
-    monty_form_r2: Option<&UintRef>,
 ) -> Choice {
     let x_nonzero = x.is_nonzero();
     let limbs = x.nlimbs();
@@ -178,7 +175,7 @@ pub const fn invert_odd_mod<'a>(
 
     let (u, buf) = buf.split_at_mut(limbs);
     let v = buf.leading_mut(limbs);
-    let mut cofactors = CofactorPair::new(u, v, y, y_inv, monty_form_r2);
+    let mut cofactors = CofactorPair::new(u, v, y, y_inv);
 
     pair.raw_xgcd(&mut cofactors);
 
@@ -206,7 +203,6 @@ pub const fn invert_odd_mod_small<'a>(
     y: &'a Odd<UintRef>,
     y_inv: Limb,
     buf: &'a mut UintRef,
-    monty_form_r2: Option<&UintRef>,
 ) -> Choice {
     debug_assert!(x.nlimbs() <= SMALL_THRESHOLD_LIMBS);
 
@@ -219,7 +215,7 @@ pub const fn invert_odd_mod_small<'a>(
 
     let (u, buf) = buf.split_at_mut(limbs);
     let v = buf.leading_mut(limbs);
-    let mut cofactors = CofactorPair::new(u, v, y, y_inv, monty_form_r2);
+    let mut cofactors = CofactorPair::new(u, v, y, y_inv);
 
     pair.raw_xgcd_small(&mut cofactors);
 
@@ -261,7 +257,7 @@ pub const fn invert_odd_mod_vartime<'a>(
 
     let (u, buf) = buf.split_at_mut(limbs);
     let v = buf.leading_mut(limbs);
-    let mut cofactors = CofactorPair::new(u, v, y, y_inv, None);
+    let mut cofactors = CofactorPair::new(u, v, y, y_inv);
 
     pair.raw_xgcd(&mut cofactors);
     if !b.is_one().to_bool_vartime() {
@@ -315,7 +311,7 @@ pub const fn xgcd_odd(
 
     let (u, rest) = rest.split_at_mut(limbs);
     let (v, _) = rest.split_at_mut(limbs);
-    let mut cofactors = CofactorPair::new(u, v, y_odd, y_inv, None);
+    let mut cofactors = CofactorPair::new(u, v, y_odd, y_inv);
 
     // Perform the partial XGCD, populating `a`
     pair.raw_xgcd(&mut cofactors);
@@ -381,7 +377,7 @@ pub const fn xgcd_vartime(
 
     let (u, rest) = rest.split_at_mut(wide_len);
     let v = rest.leading_mut(wide_len);
-    let mut cofactors = CofactorPair::new(u, v, y_odd, y_inv, None);
+    let mut cofactors = CofactorPair::new(u, v, y_odd, y_inv);
 
     // Perform the partial XGCD, populating `a`
     pair.raw_xgcd(&mut cofactors);

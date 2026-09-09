@@ -17,7 +17,7 @@ impl BoxedUint {
     #[must_use]
     pub fn invert_odd_mod(&self, modulus: &Odd<Self>) -> CtOption<Self> {
         let mod_inv = modulus.as_uint_ref().invert_mod_limb();
-        modulus.invert_mod_precomputed(self, mod_inv, None)
+        modulus.invert_mod_precomputed(self, mod_inv)
     }
 
     /// Computes the multiplicative inverse of `self` mod `modulus`, where `modulus` is odd.
@@ -190,7 +190,6 @@ impl Odd<BoxedUint> {
         &self,
         value: &BoxedUint,
         self_inv: Limb,
-        monty_form_r2: Option<&BoxedUint>,
     ) -> CtOption<BoxedUint> {
         let bits_precision = self.bits_precision().max(value.bits_precision());
         let mut a = value.resize(bits_precision);
@@ -201,7 +200,6 @@ impl Odd<BoxedUint> {
             self.as_uint_ref(),
             self_inv,
             buf.as_mut_uint_ref(),
-            monty_form_r2.map(BoxedUint::as_uint_ref),
         );
         CtOption::new(a, is_some)
     }
