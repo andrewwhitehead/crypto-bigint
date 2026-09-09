@@ -155,7 +155,7 @@ impl<const LIMBS: usize> Uint<LIMBS> {
     #[must_use]
     pub const fn invert_odd_mod(&self, modulus: &Odd<Self>) -> CtOption<Self> {
         let mod_inv = modulus.as_uint_ref().invert_mod_limb();
-        modulus.invert_mod_precomputed(self, mod_inv, None)
+        modulus.invert_mod_precomputed(self, mod_inv)
     }
 
     /// Computes the multiplicative inverse of `self` mod `modulus`, where `modulus` is odd.
@@ -189,7 +189,7 @@ impl<const LIMBS: usize> Uint<LIMBS> {
 
         // Decompose `self` into RNS with moduli `2^k` and `s` and calculate the inverses.
         // Using the fact that `(z^{-1} mod (m1 * m2)) mod m1 == z^{-1} mod m1`
-        let maybe_a = s.invert_mod_precomputed(self, m_odd_inv.limbs[0], None);
+        let maybe_a = s.invert_mod_precomputed(self, m_odd_inv.limbs[0]);
 
         let maybe_b = self.invert_mod2k(k);
         let is_some = maybe_a.is_some().and(maybe_b.is_some());
@@ -260,15 +260,10 @@ impl<const LIMBS: usize> Odd<Uint<LIMBS>> {
         &self,
         value: &Uint<LIMBS>,
         self_inv: Limb,
-        monty_form_r2: Option<Uint<LIMBS>>,
     ) -> CtOption<Uint<LIMBS>> {
         let mut a = *value;
         let m = self.as_uint_ref();
         let mut buf = [[Limb::ZERO; LIMBS]; 3];
-        let r2 = match monty_form_r2.as_ref() {
-            Some(u) => Some(u.as_uint_ref()),
-            None => None,
-        };
 
         let is_some = if const { LIMBS <= gcd::SMALL_THRESHOLD_LIMBS } {
             gcd::invert_odd_mod_small(
@@ -276,7 +271,6 @@ impl<const LIMBS: usize> Odd<Uint<LIMBS>> {
                 m,
                 self_inv,
                 UintRef::new_flattened_mut(&mut buf),
-                r2,
             )
         } else {
             gcd::invert_odd_mod(
@@ -284,7 +278,6 @@ impl<const LIMBS: usize> Odd<Uint<LIMBS>> {
                 m,
                 self_inv,
                 UintRef::new_flattened_mut(&mut buf),
-                r2,
             )
         };
 

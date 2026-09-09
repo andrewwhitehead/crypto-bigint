@@ -23,12 +23,11 @@ impl<const LIMBS: usize> FixedMontyForm<LIMBS> {
     #[must_use]
     pub const fn invert(&self) -> CtOption<Self> {
         let m_inv = self.params.mod_inv.limbs[0];
-        let maybe_inverse = self.params.modulus.invert_mod_precomputed(
-            &self.montgomery_form,
-            m_inv,
-            Some(self.params.r2),
-        );
-        let ret = Self::from_montgomery(maybe_inverse.to_inner_unchecked(), &self.params);
+        let maybe_inverse = self
+            .params
+            .modulus
+            .invert_mod_precomputed(&self.retrieve(), m_inv);
+        let ret = Self::new(maybe_inverse.as_inner_unchecked(), &self.params);
         CtOption::new(ret, maybe_inverse.is_some())
     }
 

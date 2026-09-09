@@ -9,14 +9,13 @@ impl BoxedMontyForm {
     #[must_use]
     pub fn invert(&self) -> CtOption<Self> {
         let m_inv = self.params.mod_inv().limbs[0];
-        let maybe_inverse = self.params.modulus().invert_mod_precomputed(
-            &self.montgomery_form,
-            m_inv,
-            Some(self.params.r2()),
-        );
+        let maybe_inverse = self
+            .params
+            .modulus()
+            .invert_mod_precomputed(&self.retrieve(), m_inv);
         let is_some = maybe_inverse.is_some();
         let fallback = self.montgomery_form.clone();
-        let ret = BoxedMontyForm::from_montgomery(maybe_inverse.unwrap_or(fallback), &self.params);
+        let ret = BoxedMontyForm::new(maybe_inverse.unwrap_or(fallback), &self.params);
         CtOption::new(ret, is_some)
     }
 

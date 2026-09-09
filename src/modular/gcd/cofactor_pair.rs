@@ -30,51 +30,30 @@ pub struct CofactorPair<'a> {
 impl<'a> CofactorPair<'a> {
     /// Starts tracking `u`, `v` mod `y`, with no pending shift (`k = 0`).
     ///
-    /// Seeds `u` at `1` or, when `monty_form_r2` is given, at that Montgomery `R^2` instead.
-    /// Seeds `v` at `0`. This is the coefficient paired with `f`, and the one [`Self::finalize`]
+    /// Seeds `u` at `1`.
+    /// Seeds `v` at `0`. This is the coefficient paired with `b`, and the one [`Self::finalize`]
     /// actually returns.
     ///
-    /// The starting window width starts at 1 when `monty_form_r2` is not provided,
-    /// and at `u.nlimbs()` when it is – in the second case the coefficients have no
-    /// room to grow and reductions are applied after each batch update.
+    /// The starting window width starts at 0.
     #[allow(clippy::cast_possible_truncation)]
     pub const fn new(
         u: &'a mut UintRef,
         v: &'a mut UintRef,
         y: &'a Odd<UintRef>,
         y_inv: Limb,
-        monty_form_r2: Option<&UintRef>,
     ) -> Self {
         assert!(u.nlimbs() == v.nlimbs());
+        u.set_from_limb(Limb::ONE);
         v.fill(Limb::ZERO);
-        let len = if let Some(r2) = monty_form_r2 {
-            u.copy_from(r2);
-            u.nlimbs()
-        } else {
-            u.fill(Limb::ZERO);
-            u.limbs[0] = Limb::ONE;
-            1
-        };
-        Self::new_with_len(u, v, y, y_inv, len)
-    }
-
-    /// Construct a new instance with initialized buffers and a tracked window length.
-    const fn new_with_len(
-        u: &'a mut UintRef,
-        v: &'a mut UintRef,
-        y: &'a Odd<UintRef>,
-        y_inv: Limb,
-        len: usize,
-    ) -> Self {
         Self {
             u,
             u_hi: Limb::ZERO,
             v,
             v_hi: Limb::ZERO,
-            len,
+            len: 0,
             k: 0,
             k_deferred: 0,
-            cap_remain: Limb::BITS - 1,
+            cap_remain: 0,
             y,
             y_inv,
         }
@@ -111,6 +90,43 @@ impl<'a> CofactorPair<'a> {
         }
     }
 
+    /// Materializes the round-0 identity state `(u, v) = (1, 0)` and `m` in one step: rather than
+    /// actually multiplying `m` by that trivial vector, assigns `m`'s first column straight to
+    /// `(u, v)` -- `r0.0*1 + r0.1*0 = r0.0` and `r1.0*1 + r1.1*0 = r1.0` -- since [`Self::new`]
+    /// never materializes that starting `1` in `u`'s buffer at all (`len == 0` is the sentinel
+    /// for it).
+    ///
+    /// Still runs the same growth-schedule accounting a normal round would via
+    /// [`Self::apply_matrix`]'s own growth block, so [`Self::cap_remain`]/[`Self::k_deferred`]
+    /// come out exactly as if `u` had started genuinely materialized at `len == 1` and this round
+    /// had gone through [`Self::wrapping_apply_matrix`] like any other -- required for later
+    /// rounds' own growth decisions to stay correct. [`SignedLimb`](super::matrix::SignedLimb)'s
+    /// own invariant (never more than one limb's magnitude) guarantees this round's growth always
+    /// fits the freshly-reset `cap_remain`, so the `grow_to` branch is unreachable in practice, but
+    /// is kept for symmetry with [`Self::apply_matrix`] rather than assumed away.
+    #[inline(always)]
+    const fn set_from_matrix(&mut self, m: SignedLimbMatrix, k: u32) {
+        if !self.is_full() {
+            let growth = k + 1;
+            if growth <= self.cap_remain {
+                self.cap_remain -= growth;
+            } else {
+                self.grow_to(self.len + 1);
+                self.cap_remain = self.cap_remain + Limb::BITS - growth;
+            }
+            if self.is_full() {
+                // `self.k` is still `0` here (nothing has been applied yet), so this only ever
+                // retires a no-op debt -- kept for symmetry with `apply_matrix`'s own block.
+                self.k_deferred += self.k;
+                self.k = 0;
+            }
+        }
+        self.len = 1;
+        (self.u.limbs[0], self.u_hi) = m.r0.0.signed_limb_pair();
+        (self.v.limbs[0], self.v_hi) = m.r1.0.signed_limb_pair();
+        self.k = k;
+    }
+
     /// Applies one round's already column-sign-adjusted matrix `m` to the live `u`/`v` window and
     /// folds in that round's shift `k`. No growth, no reduction.
     #[inline(always)]
@@ -143,8 +159,20 @@ impl<'a> CofactorPair<'a> {
     ///
     /// Leaves `u` stale. Correct only as the final call on this [`CofactorPair`]; a subsequent
     /// [`Self::apply_matrix`] would fold that stale `u` back into `v`.
+    ///
+    /// When this is also the *first* call (`len == 0`, `u`'s implicit `1` never materialized --
+    /// see [`Self::set_from_matrix`]), goes through `set_from_matrix` just like
+    /// [`Self::apply_matrix`] does: there is no `(u, v)` window yet for
+    /// [`Self::wrapping_half_apply_matrix`] to read `u` from, so without this it would silently
+    /// treat the implicit starting `u = 1` as `0` and produce a wrong `v`. Computing `u`'s row too
+    /// costs nothing extra here -- with no existing window there's no multiply-accumulate loop to
+    /// halve in the first place, just the same single `signed_limb_pair` call either way.
     #[inline(always)]
     pub const fn half_apply_matrix(&mut self, m: SignedLimbMatrix, k: u32) {
+        if self.len == 0 {
+            self.set_from_matrix(m, k);
+            return;
+        }
         self.reduce_k();
         if !self.is_full() {
             let growth = k + 1;
@@ -189,9 +217,6 @@ impl<'a> CofactorPair<'a> {
     /// non-increasing rather than merely held in place. The borrowed bit is subtracted from
     /// `k_deferred` so the total owed is unchanged -- one per post-full round, against a backlog
     /// of thousands.
-    ///
-    /// With no backlog (the `monty_form_r2` seeding, whose window starts full) there is nothing to
-    /// borrow, and the correction is applied as before.
     #[inline(always)]
     const fn reduce_k(&mut self) {
         if self.is_full() && self.k != 0 {
@@ -273,22 +298,26 @@ impl<'a> CofactorPair<'a> {
     #[inline(always)]
     pub const fn apply_matrix(&mut self, m: SignedLimbMatrix, k: u32) {
         self.reduce_k();
-        if !self.is_full() {
-            let growth = k + 1;
-            if growth <= self.cap_remain {
-                self.cap_remain -= growth;
-            } else {
-                self.grow_to(self.len + 1);
-                self.cap_remain = self.cap_remain + Limb::BITS - growth;
+        if self.len == 0 {
+            self.set_from_matrix(m, k);
+        } else {
+            if !self.is_full() {
+                let growth = k + 1;
+                if growth <= self.cap_remain {
+                    self.cap_remain -= growth;
+                } else {
+                    self.grow_to(self.len + 1);
+                    self.cap_remain = self.cap_remain + Limb::BITS - growth;
+                }
+                if self.is_full() {
+                    // The window just filled. Everything owed up to here is retired to `k_deferred`
+                    // and never paid on `u` at all -- see this method's doc.
+                    self.k_deferred += self.k;
+                    self.k = 0;
+                }
             }
-            if self.is_full() {
-                // The window just filled. Everything owed up to here is retired to `k_deferred`
-                // and never paid on `u` at all -- see this method's doc.
-                self.k_deferred += self.k;
-                self.k = 0;
-            }
+            self.wrapping_apply_matrix(m, k);
         }
-        self.wrapping_apply_matrix(m, k);
     }
 
     /// Vartime equivalent of [`Self::apply_matrix`]: pays off any shift pending from the previous
@@ -305,15 +334,19 @@ impl<'a> CofactorPair<'a> {
     #[inline(always)]
     pub const fn apply_matrix_vartime(&mut self, m: SignedLimbMatrix, k: u32) {
         self.reduce_k_vartime();
-        let growing = !self.is_full();
-        self.wrapping_apply_matrix(m, k);
-        let overflow = self.overflow_vartime();
-        if overflow != 0 {
-            self.grow_to(self.len + 1);
-        }
-        if growing && self.is_full() {
-            self.k_deferred += self.k;
-            self.k = 0;
+        if self.len == 0 {
+            self.set_from_matrix(m, k);
+        } else {
+            let growing = !self.is_full();
+            self.wrapping_apply_matrix(m, k);
+            let overflow = self.overflow_vartime();
+            if overflow != 0 {
+                self.grow_to(self.len + 1);
+            }
+            if growing && self.is_full() {
+                self.k_deferred += self.k;
+                self.k = 0;
+            }
         }
     }
 
@@ -323,8 +356,16 @@ impl<'a> CofactorPair<'a> {
     /// keep the *next* round's inputs in range, and there is no next round.
     ///
     /// Leaves `u` stale, so this must be the final call on this [`CofactorPair`].
+    ///
+    /// Same `len == 0` fast path as [`Self::half_apply_matrix`], and for the same reason: with no
+    /// `(u, v)` window materialized yet, [`Self::wrapping_half_apply_matrix`] would read `u` as
+    /// `0` instead of the implicit starting `1` and produce a wrong `v`.
     #[inline(always)]
     pub const fn half_apply_matrix_vartime(&mut self, m: SignedLimbMatrix, k: u32) {
+        if self.len == 0 {
+            self.set_from_matrix(m, k);
+            return;
+        }
         self.reduce_k_vartime();
         self.wrapping_half_apply_matrix(m, k);
     }

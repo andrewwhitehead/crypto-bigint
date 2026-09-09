@@ -22,6 +22,22 @@ impl SignedLimb {
     pub const fn new(value: Limb, sign: Choice) -> Self {
         Self { value, sign }
     }
+
+    /// Convert into a pair of Limbs representing the two's complement value and a sign word.
+    ///
+    /// The sign word is a full sign-extension mask (`Limb::ZERO`/`Limb::MAX`), not the raw
+    /// negation carry: negating a single limb only ever carries when the *magnitude* is zero
+    /// (there's nothing above the sign bit to borrow from), which is the opposite of when the
+    /// result needs a `Limb::MAX` extension -- every nonzero negative value does, zero never
+    /// does regardless of sign.
+    pub(crate) const fn signed_limb_pair(&self) -> (Limb, Limb) {
+        let sign_mask = Limb::choice_to_mask(self.sign);
+        let (value, borrow) = self
+            .value
+            .bitxor(sign_mask)
+            .borrowing_sub(sign_mask, Limb::ZERO);
+        (value, borrow)
+    }
 }
 
 impl CtEq for SignedLimb {
