@@ -344,16 +344,15 @@ pub const fn partial_xgcd<const HALTING: bool>(
 /// accumulated Jacobi symbol sign flips.
 #[inline(always)]
 #[must_use]
-pub const fn partial_xgcd_word(mut a: Word, mut b: Word, steps: u32) -> (Word, BingcdMatrix, Word) {
+pub const fn partial_xgcd_word(mut a: Word, mut b: Word, steps: u32) -> (Word, BingcdMatrix) {
     debug_assert!(b & 1 == 1, "b must be odd");
 
     let mut m = BingcdMatrix::UNIT;
     let mut i = 0;
-    let mut jacobi_neg = 0;
 
     while i < steps {
         let (apply_sub, apply_swap);
-        ((a, b), apply_sub, apply_swap, jacobi_neg) = step_word(a, b, jacobi_neg);
+        ((a, b), apply_sub, apply_swap, _) = step_word(a, b, 0);
 
         (m.r0, m.r1, m.pattern) = (
             (
@@ -371,7 +370,7 @@ pub const fn partial_xgcd_word(mut a: Word, mut b: Word, steps: u32) -> (Word, B
     }
 
     m.k = steps;
-    (b, m, jacobi_neg & 1)
+    (b, m)
 }
 
 /// [`partial_xgcd`]'s variable-time counterpart, used by the vartime GCD/XGCD/Jacobi-symbol paths:
