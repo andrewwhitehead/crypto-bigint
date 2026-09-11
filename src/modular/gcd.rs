@@ -50,9 +50,9 @@ pub const fn gcd_odd(a: &mut UintRef, b: &mut UintRef) {
 /// Thin wrapper around [`GcdPair::gcd_small`], always deriving its step
 /// budget from `b`'s own width.
 #[inline(always)]
-pub const fn gcd_odd_fixed<const LIMBS: usize>(a: &mut UintRef, b: &mut UintRef) {
+pub const fn gcd_odd_small(a: &mut UintRef, b: &mut UintRef) {
     let mut pair = GcdPair::new(a, b);
-    pair.gcd_fixed::<false, LIMBS>();
+    pair.gcd_small::<false>();
 }
 
 /// Computes `gcd(a, b)`, leaving it in whichever of `a`/`b` the returned `bool` names (`true` for
@@ -87,32 +87,6 @@ pub const fn gcd_vartime(a: &mut UintRef, b: &mut UintRef) -> bool {
     false
 }
 
-/// Computes the Jacobi symbol `(a|b)` for odd `b`, specialized for small operands.
-///
-/// Uses [`GcdPair::gcd_small`]'s small-width reduction loop directly, skipping
-/// the deferred-sign Stage 1 loop [`jacobi_symbol`] uses for wider operands.
-///
-/// Inputs:
-/// - `a`, `b`: same width (`nlimbs`); `b` must be odd.
-///
-/// Outputs:
-/// - `a`, `b` are consumed as scratch and left in an unspecified state.
-/// - Returns [`JacobiSymbol::Zero`] if `gcd(a, b) != 1` (detected via `b` failing to reduce to
-///   `1`), otherwise the sign accumulated by the underlying reduction's quadratic-reciprocity
-///   flips, folded together via [`JacobiSymbol::from_sign`].
-///
-/// # Panics
-/// If `a` and `b` are not the same width or `b` is not odd.
-#[inline(always)]
-pub const fn jacobi_symbol_fixed<const LIMBS: usize>(
-    a: &mut UintRef,
-    b: &mut UintRef,
-) -> JacobiSymbol {
-    let mut pair = GcdPair::new(a, b);
-    let jacobi_neg = pair.gcd_fixed::<true, LIMBS>();
-    JacobiSymbol::from_sign(jacobi_neg & 1).zero_if(b.is_one().not())
-}
-
 /// Computes the Jacobi symbol `(a|b)` for odd `b`, using the full deferred-sign
 /// [`GcdPair::gcd`] reduction loop.
 ///
@@ -130,6 +104,29 @@ pub const fn jacobi_symbol_fixed<const LIMBS: usize>(
 pub const fn jacobi_symbol(a: &mut UintRef, b: &mut UintRef) -> JacobiSymbol {
     let mut pair = GcdPair::new(a, b);
     let jacobi_neg = pair.gcd::<true>();
+    JacobiSymbol::from_sign(jacobi_neg & 1).zero_if(b.is_one().not())
+}
+
+/// Computes the Jacobi symbol `(a|b)` for odd `b`, specialized for small operands.
+///
+/// Uses [`GcdPair::gcd_small`]'s small-width reduction loop directly, skipping
+/// the deferred-sign Stage 1 loop [`jacobi_symbol`] uses for wider operands.
+///
+/// Inputs:
+/// - `a`, `b`: same width (`nlimbs`); `b` must be odd.
+///
+/// Outputs:
+/// - `a`, `b` are consumed as scratch and left in an unspecified state.
+/// - Returns [`JacobiSymbol::Zero`] if `gcd(a, b) != 1` (detected via `b` failing to reduce to
+///   `1`), otherwise the sign accumulated by the underlying reduction's quadratic-reciprocity
+///   flips, folded together via [`JacobiSymbol::from_sign`].
+///
+/// # Panics
+/// If `a` and `b` are not the same width or `b` is not odd.
+#[inline(always)]
+pub const fn jacobi_symbol_small(a: &mut UintRef, b: &mut UintRef) -> JacobiSymbol {
+    let mut pair = GcdPair::new(a, b);
+    let jacobi_neg = pair.gcd_small::<true>();
     JacobiSymbol::from_sign(jacobi_neg & 1).zero_if(b.is_one().not())
 }
 
