@@ -21,8 +21,8 @@ impl<const LIMBS: usize> Uint<LIMBS> {
         };
         let mut rhs = *rhs.as_ref();
 
-        if const { LIMBS <= gcd::SMALL_THRESHOLD_LIMBS } {
-            gcd::jacobi_symbol_small(lhs.as_mut_uint_ref(), rhs.as_mut_uint_ref())
+        if const { RHS_LIMBS <= gcd::SMALL_THRESHOLD_LIMBS } {
+            gcd::jacobi_symbol_fixed::<RHS_LIMBS>(lhs.as_mut_uint_ref(), rhs.as_mut_uint_ref())
         } else {
             gcd::jacobi_symbol(lhs.as_mut_uint_ref(), rhs.as_mut_uint_ref())
         }
