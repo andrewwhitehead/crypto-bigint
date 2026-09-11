@@ -50,9 +50,9 @@ pub const fn gcd_odd(a: &mut UintRef, b: &mut UintRef) {
 /// Thin wrapper around [`GcdPair::gcd_small`], always deriving its step
 /// budget from `b`'s own width.
 #[inline(always)]
-pub const fn gcd_odd_small(a: &mut UintRef, b: &mut UintRef) {
+pub const fn gcd_odd_fixed<const LIMBS: usize>(a: &mut UintRef, b: &mut UintRef) {
     let mut pair = GcdPair::new(a, b);
-    pair.gcd_small::<false>();
+    pair.gcd_fixed::<false, LIMBS>();
 }
 
 /// Computes `gcd(a, b)`, leaving it in whichever of `a`/`b` the returned `bool` names (`true` for
@@ -104,9 +104,12 @@ pub const fn gcd_vartime(a: &mut UintRef, b: &mut UintRef) -> bool {
 /// # Panics
 /// If `a` and `b` are not the same width or `b` is not odd.
 #[inline(always)]
-pub const fn jacobi_symbol_small(a: &mut UintRef, b: &mut UintRef) -> JacobiSymbol {
+pub const fn jacobi_symbol_fixed<const LIMBS: usize>(
+    a: &mut UintRef,
+    b: &mut UintRef,
+) -> JacobiSymbol {
     let mut pair = GcdPair::new(a, b);
-    let jacobi_neg = pair.gcd_small::<true>();
+    let jacobi_neg = pair.gcd_fixed::<true, LIMBS>();
     JacobiSymbol::from_sign(jacobi_neg & 1).zero_if(b.is_one().not())
 }
 
@@ -179,7 +182,7 @@ pub const fn invert_odd_mod<'a>(
 
     pair.raw_xgcd(&mut cofactors);
 
-    let inv = cofactors.finalize_vartime();
+    let inv = cofactors.finalize();
     x.copy_from(inv);
 
     gcd.is_one().and(x_nonzero)
@@ -219,7 +222,7 @@ pub const fn invert_odd_mod_small<'a>(
 
     pair.raw_xgcd_small(&mut cofactors);
 
-    let inv = cofactors.finalize_vartime();
+    let inv = cofactors.finalize();
     x.copy_from(inv);
 
     gcd.is_one().and(x_nonzero)

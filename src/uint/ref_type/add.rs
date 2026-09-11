@@ -118,7 +118,7 @@ impl UintRef {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Choice, Limb, UintRef, Unsigned};
+    use crate::{Choice, Limb, UintRef};
 
     #[test]
     fn carrying_add_assign_mixed() {

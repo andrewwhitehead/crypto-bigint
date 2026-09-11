@@ -142,7 +142,7 @@ impl<const LIMBS: usize> OddUint<LIMBS> {
         let mut b = self.get_copy();
 
         if const { LIMBS <= gcd::SMALL_THRESHOLD_LIMBS } {
-            gcd::gcd_odd_small(a.as_mut_uint_ref(), b.as_mut_uint_ref());
+            gcd::gcd_odd_fixed::<LIMBS>(a.as_mut_uint_ref(), b.as_mut_uint_ref());
         } else {
             gcd::gcd_odd(a.as_mut_uint_ref(), b.as_mut_uint_ref());
         }
