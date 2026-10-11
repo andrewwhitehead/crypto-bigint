@@ -15,7 +15,7 @@ mod slice;
 mod sqrt;
 mod sub;
 
-use crate::{Choice, Limb, NonZero, Odd, Uint, WideWord, Word, word};
+use crate::{Choice, Limb, NonZero, Odd, Uint, Word};
 use core::{
     fmt,
     ops::{Index, IndexMut},
@@ -246,29 +246,6 @@ impl UintRef {
     pub(crate) const fn set_from_limb(&mut self, value: Limb) {
         self.limbs[0] = value;
         self.trailing_mut(1).fill(Limb::ZERO);
-    }
-
-    /// Assign the value from a single [`WideWord`], clearing any higher limbs.
-    #[inline(always)]
-    #[allow(clippy::cast_possible_truncation)]
-    pub(crate) const fn set_from_wide_word(&mut self, value: WideWord) {
-        if self.nlimbs() >= 2 {
-            (self.limbs[0].0, self.limbs[1].0) = word::split_wide(value);
-            self.trailing_mut(2).fill(Limb::ZERO);
-        } else {
-            debug_assert!(value >> Word::BITS == 0);
-            self.limbs[0].0 = value as Word;
-        }
-    }
-
-    /// Extract a [`WideWord`] from the lowest 1-2 limbs, ignoring any higher limbs.
-    #[inline(always)]
-    pub(crate) const fn to_wide_word_unchecked(&self) -> WideWord {
-        if self.nlimbs() < 2 {
-            self.limbs[0].0 as WideWord
-        } else {
-            word::join(self.limbs[0].0, self.limbs[1].0)
-        }
     }
 }
 

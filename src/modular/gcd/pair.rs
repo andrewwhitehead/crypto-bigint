@@ -2,8 +2,8 @@ use super::{
     CofactorPair, ExtendedIntRef, SMALL_THRESHOLD_LIMBS, SPLIT_BATCH_SIZE, WORD_BATCH_SIZE, bingcd,
 };
 use crate::{
-    Choice, Limb, Uint, UintRef, WideWord, Word, modular::gcd::bingcd::BingcdMatrix,
-    primitives::u32_min, word,
+    Choice, Limb, Uint, UintRef, Word, modular::gcd::bingcd::BingcdMatrix, primitives::u32_min,
+    word,
 };
 
 /// The running state of a binary GCD reduction.
@@ -82,8 +82,10 @@ impl GcdPair<'_> {
         // Stage 1 batches: extract according the fixed schedule, build the transition matrix, apply it to
         // `(a, b)` and update the schedule.
         while self.len > SMALL_THRESHOLD_LIMBS {
+            // The schedule position `E = (k_remain + 1) / 2` is taken before this batch is
+            // charged, and the extraction reads from a full word below it.
+            let extract_pos = ((self.k_remain + 1) >> 1) - Limb::BITS;
             self.k_remain -= SPLIT_BATCH_SIZE;
-            let extract_pos = (self.k_remain + 1) >> 1;
 
             let (mut a_ext, mut b_ext) = (
                 ExtendedIntRef::new(self.a.leading_mut(self.len), a_hi),
@@ -127,12 +129,12 @@ impl GcdPair<'_> {
             }
         }
 
-        // Stage 2: batched matrix reduction down to a 2-limb window.
+        // Stage 2: batched matrix reduction down to a single-word remainder, then word steps.
         jacobi_neg ^ self.gcd_small::<JACOBI>()
     }
 
     /// Reduces `a`/`b` down to their gcd using the exact, non-deferred-sign counterpart of
-    /// [`Self::gcd`]'s reduction loop, then using specialized reductions for 2 and 1 limb sizes.
+    /// [`Self::gcd`]'s reduction loop, then finishing with single-`Word` elementary steps.
     ///
     /// Spends the step budget `self.k_remain`, leaving it at zero.
     ///
@@ -140,12 +142,13 @@ impl GcdPair<'_> {
     /// - `b` receives `gcd(a, b)` and `a` is left zeroed.
     ///
     /// The batched matrix reduction operates on `a`/`b` a `SPLIT_BATCH_SIZE`-step matrix at a
-    /// time, until the window is narrow enough for the `WideWord` and `Word` step functions to
-    /// finish the job.
+    /// time, until at most `WORD_BATCH_SIZE` steps of budget remain. At that point the operands
+    /// (which occupy at most `k_remain` bits) fit a single `Word`, and the `Word` step function
+    /// finishes the job. An operand that starts at a single limb skips the batches entirely.
     ///
     /// Each stage spends a fixed, input-independent number of steps per round --
-    /// `SPLIT_BATCH_SIZE` for a batch, one for a `WideWord`/`Word` step -- so how the budget
-    /// splits across the three is pure arithmetic on `self.k_remain`, settled before any
+    /// `SPLIT_BATCH_SIZE` for a batch, one for a `Word` step -- so how the budget
+    /// splits across the two is pure arithmetic on `self.k_remain`, settled before any
     /// reduction runs. Each stage is then a counted loop over a value the compiler can fold to a
     /// constant whenever `self.k_remain` is one, as it is for the fixed-`LIMBS` entry points.
     #[inline(always)]
@@ -153,35 +156,22 @@ impl GcdPair<'_> {
     pub const fn gcd_small<const JACOBI: bool>(&mut self) -> Word {
         let mut jacobi_neg = 0;
 
-        // A stage may only run once the tracked values are known to fit its representation, which
-        // the budget itself reports: with `k_remain` steps left to spend they occupy at most
-        // `k_remain` bits. So the last `Limb::BITS` steps are a single `Word`'s and the
-        // `WideWord::BITS` before those a `WideWord`'s -- the same schedule `Self::gcd`'s
-        // `window_shrink_at` walks. Each register stage claims the most it can legally hold and
-        // batches cover only what is left above them; a batch is indivisible, so rounding their
-        // count up takes back up to `SPLIT_BATCH_SIZE - 1` of the wide stage's steps, still
-        // leaving it no fewer than `Limb::BITS - SPLIT_BATCH_SIZE` of them.
-        const { assert!(SPLIT_BATCH_SIZE <= Limb::BITS) };
-        let word_steps = if self.len > 1 && self.k_remain > Limb::BITS {
-            Limb::BITS
+        // The batches narrow the operands until the remaining budget fits a single `Word`: with
+        // `k_remain` steps left to spend the tracked values occupy at most `k_remain` bits, so the
+        // last `WORD_BATCH_SIZE` or fewer steps are a single `Word`'s. A single limb is stepped
+        // directly. The step counts are pure arithmetic on `self.k_remain`, settled before any
+        // reduction runs, so each stage is a counted loop the compiler can fold to a constant
+        // whenever `self.k_remain` is one, as it is for the fixed-`LIMBS` entry points.
+        let batches = if self.len == 1 {
+            0
         } else {
             self.k_remain
+                .saturating_sub(WORD_BATCH_SIZE)
+                .div_ceil(SPLIT_BATCH_SIZE)
         };
-        let rest = self.k_remain - word_steps;
-        let wide_max = if self.len > 2 && rest > Limb::BITS {
-            Limb::BITS
-        } else {
-            rest
-        };
-        let batches = (rest - wide_max).div_ceil(SPLIT_BATCH_SIZE);
-        let wide_steps = rest - batches * SPLIT_BATCH_SIZE;
+        let word_steps = self.k_remain - batches * SPLIT_BATCH_SIZE;
 
-        // Where the batches below are what narrows the operands, they have to leave the wide stage
-        // a budget it can legally start on. A `self.len` of 2 or less needs no such guarantee: the
-        // operands are already no wider than the stage's own representation.
-        debug_assert!(self.len <= 2 || word_steps + wide_steps <= WideWord::BITS);
-
-        // Batched matrix reduction down to a 2-limb window.
+        // Batched matrix reduction down to what a single `Word` can finish.
         let mut i = 0;
         while i < batches {
             (_, _, jacobi_neg) = gcd_reduce_small::<JACOBI>(
@@ -191,26 +181,10 @@ impl GcdPair<'_> {
             );
             i += 1;
 
-            if self.k_remain <= self.window_shrink_at {
+            if self.len != 1 && self.k_remain <= self.window_shrink_at {
                 self.len -= 1;
                 self.window_shrink_at -= Limb::BITS;
             }
-        }
-
-        // `WideWord` elementary steps, down to what a single `Word` can finish.
-        if wide_steps != 0 {
-            let (a2, b2) = (self.a.leading_mut(2), self.b.leading_mut(2));
-            let mut a = a2.to_wide_word_unchecked();
-            let mut b = b2.to_wide_word_unchecked();
-            let mut i = 0;
-            while i < wide_steps {
-                let j_neg;
-                ((a, b), _, _, j_neg) = bingcd::step_wide_word(a, b);
-                jacobi_neg ^= j_neg;
-                i += 1;
-            }
-            a2.set_from_wide_word(a);
-            b2.set_from_wide_word(b);
         }
 
         // Single-`Word` finish for the remaining reduction steps.
@@ -265,8 +239,10 @@ impl GcdPair<'_> {
         // Stage 1 batches: extract, build the transition matrix, apply it to `(a, b)` and
         // `(u, v)`, and update the schedule.
         while self.len > SMALL_THRESHOLD_LIMBS {
+            // The schedule position `E = (k_remain + 1) / 2` is taken before this batch is
+            // charged, and the extraction reads from a full word below it.
+            let extract_pos = ((self.k_remain + 1) >> 1) - Limb::BITS;
             self.k_remain -= SPLIT_BATCH_SIZE;
-            let extract_pos = (self.k_remain + 1) >> 1;
 
             let (mut a_ext, mut b_ext) = (
                 ExtendedIntRef::new(self.a.leading_mut(self.len), a_hi),

@@ -298,9 +298,9 @@ steps — Pornin's own `2N − 1` (`iterations()` in `bingcd.rs`). The
 implementation spends that budget from a counter `k_remain`, decremented by `S`
 per batch, rather than running a fixed number of batches: Stage 1 batches run
 while the tracked window is above `SMALL_THRESHOLD_LIMBS`, Stage 2 continues on
-the narrowed window until `k_remain` reaches zero, and the last two words are
-reduced exactly. What has to be shown is that the budget suffices, whichever
-mix of stages spends it.
+the narrowed window until at most `W − 2` steps remain, and the last word's
+worth is reduced exactly. What has to be shown is that the budget suffices,
+whichever mix of stages spends it.
 
 Everything in this section hangs off a single invariant. Section 4.1 states it;
 4.2 and 4.3 draw the two consequences the implementation needs — that the

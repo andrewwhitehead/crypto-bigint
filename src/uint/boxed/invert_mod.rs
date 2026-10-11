@@ -388,8 +388,8 @@ mod tests {
         // `m` is a multiple of `p1`, so no inverse exists
         let res = p1.invert_odd_mod(&m);
         let res_vartime = p1.invert_odd_mod_vartime(&m);
-        assert!(res.is_none().to_bool_vartime());
-        assert!(res_vartime.is_none().to_bool_vartime());
+        assert!(res.is_none().to_bool());
+        assert!(res_vartime.is_none().to_bool());
     }
 
     #[test]
@@ -449,8 +449,8 @@ mod tests {
 
         let res = a.invert_odd_mod(&m);
         let res_vartime = a.invert_odd_mod_vartime(&m);
-        assert!(res.is_none().to_bool_vartime());
-        assert!(res_vartime.is_none().to_bool_vartime());
+        assert!(res.is_none().to_bool());
+        assert!(res_vartime.is_none().to_bool());
     }
 
     #[test]
@@ -459,7 +459,7 @@ mod tests {
             BoxedUint::zero()
                 .invert_odd_mod(&BoxedUint::one().to_odd().unwrap())
                 .is_none()
-                .to_bool_vartime()
+                .to_bool()
         );
         assert_eq!(
             BoxedUint::one()
@@ -477,7 +477,7 @@ mod tests {
             BoxedUint::from(U256::MAX)
                 .invert_odd_mod(&BoxedUint::from(U256::MAX).to_odd().unwrap())
                 .is_none()
-                .to_bool_vartime()
+                .to_bool()
         );
     }
 

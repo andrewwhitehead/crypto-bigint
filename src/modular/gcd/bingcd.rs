@@ -1,5 +1,5 @@
 use super::{ExtendedIntRef, SPLIT_THRESHOLD_BITS, SignedLimb, SignedLimbMatrix};
-use crate::{Choice, Limb, UintRef, WideWord, Word, word};
+use crate::{Choice, Limb, UintRef, Word, word};
 
 /// A 2x2 matrix of non-negative [`Limb`] entries accumulated by a batch of elementary binary-GCD
 /// update steps ([`partial_xgcd`], [`partial_xgcd_word`], [`partial_xgcd_vartime`]), together with
@@ -161,58 +161,33 @@ pub const fn iterations(bits_precision: u32) -> u32 {
 /// a ← a/2
 /// ```
 ///
+/// Returns the updated `(a, b)`, the masks (`0` or `Word::MAX`) for whether the subtraction and
+/// the swap were applied, and the updated Jacobi sign accumulator. The decisions are derived
+/// directly as masks, once each: a `Choice` converted to a mask on every use is an optimization
+/// barrier.
+///
 /// Note: assumes `b` to be odd. Might yield an incorrect result if this is not the case.
 ///
 /// Ref: Pornin, Algorithm 1, L3-9, <https://eprint.iacr.org/2020/972.pdf>.
 #[inline(always)]
-#[allow(clippy::cast_possible_truncation)]
 pub(super) const fn step_word(
-    mut a: Word,
-    mut b: Word,
+    a: Word,
+    b: Word,
     mut jacobi_neg: Word,
-) -> ((Word, Word), Choice, Choice, Word) {
+) -> ((Word, Word), Word, Word, Word) {
     let a_b = a & b;
-    let apply_sub = word::choice_from_lsb(a);
-    let (diff, borrow) = a.overflowing_sub(word::select(0, b, apply_sub));
-    let apply_swap = Choice::from_u8_lsb(borrow as u8);
-    (a, b) = (
-        word::select(diff, diff.wrapping_neg(), apply_swap) >> 1,
-        word::select(b, a, apply_swap),
-    );
+    let sub = (a & 1).wrapping_neg();
+    let (diff, borrow) = a.overflowing_sub(b & sub);
+    let swap = (borrow as Word).wrapping_neg();
 
     // (b|a) = -(a|b) iff a = b = 3 mod 4 (quadratic reciprocity)
-    jacobi_neg ^= word::select(0, a_b & (a_b >> 1) & 1, apply_swap);
+    jacobi_neg ^= swap & a_b & (a_b >> 1) & 1;
+    let (a_next, b_next) = ((diff ^ swap).wrapping_sub(swap) >> 1, b ^ (swap & (a ^ b)));
     // (2a|b) = -(a|b) iff b = ±3 mod 8
     // b is always odd, so we ignore the lower bit and check that bits 2 and 3 are '01' or '10'
-    jacobi_neg ^= ((b >> 1) ^ (b >> 2)) & 1;
+    jacobi_neg ^= ((b_next >> 1) ^ (b_next >> 2)) & 1;
 
-    ((a, b), apply_sub, apply_swap, jacobi_neg)
-}
-
-/// [`WideWord`] variant of [`step_word`].
-#[inline(always)]
-#[allow(clippy::cast_possible_truncation)]
-pub(super) const fn step_wide_word(
-    mut a: WideWord,
-    mut b: WideWord,
-) -> ((WideWord, WideWord), Choice, Choice, Word) {
-    let a_b = a as Word & b as Word;
-
-    let a_odd = word::choice_from_lsb(a as Word);
-    let (a_sub_b, borrow) = a.overflowing_sub(word::select_wide(0, b, a_odd));
-    let swap = Choice::from_u8_lsb(borrow as u8);
-    b = word::select_wide(b, a, swap);
-    a = word::select_wide(a_sub_b, a_sub_b.wrapping_neg(), swap) >> 1;
-
-    // (b|a) = -(a|b) iff a = b = 3 mod 4 (quadratic reciprocity)
-    let mut jacobi_neg = word::select(0, a_b & (a_b >> 1), swap);
-
-    // (2a|b) = -(a|b) iff b = ±3 mod 8
-    // b is always odd, so we ignore the lower bit and check that bits 2 and 3 are '01' or '10'
-    let b_lo = b as Word;
-    jacobi_neg ^= (b_lo >> 1) ^ (b_lo >> 2);
-
-    ((a, b), a_odd, swap, jacobi_neg)
+    ((a_next, b_next), sub, swap, jacobi_neg)
 }
 
 /// Compute `gcd(a, b)` as well as the Jacobi symbol `(a|b)` in variable-time
@@ -262,6 +237,7 @@ pub(crate) const fn gcd_word_vartime(mut a: Word, mut b: Word) -> (Word, Word) {
 /// than halting early (`FALSE`, `HALTING` only).
 #[inline(always)]
 #[must_use]
+#[allow(clippy::cast_possible_truncation)]
 pub const fn partial_xgcd<const HALTING: bool>(
     (mut a_lo, mut a_hi): (Word, Word),
     (mut b_lo, mut b_hi): (Word, Word),
@@ -270,69 +246,78 @@ pub const fn partial_xgcd<const HALTING: bool>(
 ) -> (BingcdMatrix, Word, Choice) {
     debug_assert!(b_lo & 1 == 1, "b_lo must be odd");
 
-    let mut m = BingcdMatrix::UNIT;
+    // All decisions are carried as full-width masks, each derived once per step, rather than as
+    // `Choice` values: every conversion of a `Choice` to a mask is an optimization barrier.
+    let (mut r0_0, mut r0_1, mut r1_0, mut r1_1): (Word, Word, Word, Word) = (1, 0, 0, 1);
+    let mut pattern: Word = 1;
     let mut i = 0;
-    let mut jacobi_neg = 0;
+    let mut jacobi_neg: Word = 0;
     let mut real_steps = 0;
-    let mut unhalted = Choice::TRUE;
+    let mut unhalted = Word::MAX;
+    let exact = word::choice_to_mask(exact);
 
     while i < steps {
         let a_b = a_lo & b_lo;
-        let a_odd = word::choice_from_lsb(a_lo);
-        let apply_sub = if HALTING { a_odd.and(unhalted) } else { a_odd };
+        let a_odd = (a_lo & 1).wrapping_neg();
+        let sub = if HALTING { a_odd & unhalted } else { a_odd };
 
-        let (hi_diff, borrow) = a_hi.overflowing_sub(word::select(0, b_hi, apply_sub));
-        let apply_swap = Choice::from_u8_lsb(borrow as u8);
-        let lo_diff = a_lo.wrapping_sub(word::select(0, b_lo, apply_sub));
+        let (hi_diff, borrow) = a_hi.overflowing_sub(b_hi & sub);
+        let swap = (borrow as Word).wrapping_neg();
+        let lo_diff = a_lo.wrapping_sub(b_lo & sub);
         let (abs_lo_diff, abs_hi_diff) = (
-            word::select(lo_diff, lo_diff.wrapping_neg(), apply_swap),
-            word::select(hi_diff, hi_diff.wrapping_neg(), apply_swap),
+            (lo_diff ^ swap).wrapping_sub(swap),
+            (hi_diff ^ swap).wrapping_sub(swap),
         );
 
         (a_lo, a_hi, b_lo, b_hi) = (
             abs_lo_diff >> 1,
             abs_hi_diff >> 1,
-            word::select(b_lo, a_lo, apply_swap),
-            word::select(b_hi, a_hi, apply_swap),
+            b_lo ^ (swap & (a_lo ^ b_lo)),
+            b_hi ^ (swap & (a_hi ^ b_hi)),
         );
 
-        (m.r0, m.r1, m.pattern) = (
-            (
-                Limb::select(m.r0.0, m.r0.0.wrapping_add(m.r1.0), apply_sub),
-                Limb::select(m.r0.1, m.r0.1.wrapping_add(m.r1.1), apply_sub),
-            ),
-            (
-                Limb::select(m.r1.0, m.r0.0, apply_swap).shl(1),
-                Limb::select(m.r1.1, m.r0.1, apply_swap).shl(1),
-            ),
-            m.pattern.xor(apply_swap),
+        (r0_0, r0_1, r1_0, r1_1) = (
+            r0_0.wrapping_add(r1_0 & sub),
+            r0_1.wrapping_add(r1_1 & sub),
+            (r1_0 ^ (swap & (r1_0 ^ r0_0))) << 1,
+            (r1_1 ^ (swap & (r1_1 ^ r0_1))) << 1,
         );
+        pattern ^= swap & 1;
 
         // `(b|a) = -(a|b) iff a = b = 3 mod 4` (quadratic reciprocity) when a swap occurred.
-        jacobi_neg ^= word::select(0, a_b & (a_b >> 1), apply_swap);
+        jacobi_neg ^= swap & a_b & (a_b >> 1);
 
         // `(2a|b) = -(a|b) iff b = ±3 mod 8` we always strip a zero from `a` unless we fell below the threshold.
         // NB: it is valid to keep updating this after `a` hits zero, as a GCD of 1 means that the sign stays
         // the same, and a larger GCD means the correct symbol is zero.
-        jacobi_neg ^= word::select(0, (b_lo >> 1) ^ (b_lo >> 2), unhalted);
+        jacobi_neg ^= unhalted & ((b_lo >> 1) ^ (b_lo >> 2));
 
         i += 1;
 
         if HALTING {
-            real_steps = unhalted.select_u32(real_steps, i);
-            let above_threshold =
-                word::choice_from_nz(abs_hi_diff >> SPLIT_THRESHOLD_BITS).or(exact.or(a_odd.not()));
-            unhalted = unhalted.and(above_threshold);
+            let unhalted_32 = unhalted as u32;
+            real_steps ^= unhalted_32 & (real_steps ^ i);
+            let over = abs_hi_diff >> SPLIT_THRESHOLD_BITS;
+            let over_nz = (over | over.wrapping_neg()) >> (Word::BITS - 1);
+            // Barrier on the mask straight out of the comparison: without it the compiler can
+            // turn the threshold test into a branch.
+            let above_threshold = core::hint::black_box(over_nz.wrapping_neg());
+            unhalted &= above_threshold | exact | !a_odd;
         }
     }
 
     if HALTING {
-        m.r0.0 = m.r0.0.shl(steps - real_steps);
-        m.r0.1 = m.r0.1.shl(steps - real_steps);
+        r0_0 <<= steps - real_steps;
+        r0_1 <<= steps - real_steps;
     }
-    m.k = steps;
 
-    (m, jacobi_neg & 1, unhalted)
+    let m = BingcdMatrix {
+        r0: (Limb(r0_0), Limb(r0_1)),
+        r1: (Limb(r1_0), Limb(r1_1)),
+        pattern: Choice::from_u8_lsb(pattern as u8),
+        k: steps,
+    };
+    (m, jacobi_neg & 1, Choice::from_u8_lsb(unhalted as u8))
 }
 
 /// [`partial_xgcd`]'s single-word tail variant: runs `steps` elementary [`step_word`] updates
@@ -344,32 +329,35 @@ pub const fn partial_xgcd<const HALTING: bool>(
 /// accumulated Jacobi symbol sign flips.
 #[inline(always)]
 #[must_use]
+#[allow(clippy::cast_possible_truncation)]
 pub const fn partial_xgcd_word(mut a: Word, mut b: Word, steps: u32) -> (Word, BingcdMatrix) {
     debug_assert!(b & 1 == 1, "b must be odd");
 
-    let mut m = BingcdMatrix::UNIT;
+    let (mut r0_0, mut r0_1, mut r1_0, mut r1_1): (Word, Word, Word, Word) = (1, 0, 0, 1);
+    let mut pattern: Word = 1;
     let mut i = 0;
 
     while i < steps {
-        let (apply_sub, apply_swap);
-        ((a, b), apply_sub, apply_swap, _) = step_word(a, b, 0);
+        let (sub, swap);
+        ((a, b), sub, swap, _) = step_word(a, b, 0);
 
-        (m.r0, m.r1, m.pattern) = (
-            (
-                Limb::select(m.r0.0, m.r0.0.wrapping_add(m.r1.0), apply_sub),
-                Limb::select(m.r0.1, m.r0.1.wrapping_add(m.r1.1), apply_sub),
-            ),
-            (
-                Limb::select(m.r1.0, m.r0.0, apply_swap).shl(1),
-                Limb::select(m.r1.1, m.r0.1, apply_swap).shl(1),
-            ),
-            m.pattern.xor(apply_swap),
+        (r0_0, r0_1, r1_0, r1_1) = (
+            r0_0.wrapping_add(r1_0 & sub),
+            r0_1.wrapping_add(r1_1 & sub),
+            (r1_0 ^ (swap & (r1_0 ^ r0_0))) << 1,
+            (r1_1 ^ (swap & (r1_1 ^ r0_1))) << 1,
         );
+        pattern ^= swap & 1;
 
         i += 1;
     }
 
-    m.k = steps;
+    let m = BingcdMatrix {
+        r0: (Limb(r0_0), Limb(r0_1)),
+        r1: (Limb(r1_0), Limb(r1_1)),
+        pattern: Choice::from_u8_lsb(pattern as u8),
+        k: steps,
+    };
     (b, m)
 }
 
@@ -425,25 +413,25 @@ pub const fn partial_xgcd_vartime(
 
         let a_b = a_lo & b_lo;
         let (hi_diff, borrow) = a_hi.overflowing_sub(b_hi);
-        let apply_swap = Choice::from_u8_lsb(borrow as u8);
+        let swap_mask = (borrow as Word).wrapping_neg();
         let lo_diff = a_lo.wrapping_sub(b_lo);
         let (abs_lo_diff, abs_hi_diff) = (
-            word::select(lo_diff, lo_diff.wrapping_neg(), apply_swap),
-            word::select(hi_diff, hi_diff.wrapping_neg(), apply_swap),
+            (lo_diff ^ swap_mask).wrapping_sub(swap_mask),
+            (hi_diff ^ swap_mask).wrapping_sub(swap_mask),
         );
 
         (a_lo, a_hi, b_lo, b_hi) = (
             abs_lo_diff,
             abs_hi_diff,
-            word::select(b_lo, a_lo, apply_swap),
-            word::select(b_hi, a_hi, apply_swap),
+            b_lo ^ (swap_mask & (a_lo ^ b_lo)),
+            b_hi ^ (swap_mask & (a_hi ^ b_hi)),
         );
 
         (m.r0, m.r1, pattern, abort) = (
             (m.r0.0.wrapping_add(m.r1.0), m.r0.1.wrapping_add(m.r1.1)),
             (
-                Limb::select(m.r1.0, m.r0.0, apply_swap),
-                Limb::select(m.r1.1, m.r0.1, apply_swap),
+                if borrow { m.r0.0 } else { m.r1.0 },
+                if borrow { m.r0.1 } else { m.r1.1 },
             ),
             pattern ^ borrow,
             abs_hi_diff >> threshold_bits == 0,
@@ -476,7 +464,10 @@ mod tests {
             m.k = SPLIT_BATCH_SIZE;
             let mut i = 0;
             while i < m.k {
+                use crate::word;
+
                 let (new_ab, a_odd, swap, _) = super::step_word(a, b, 0);
+                let (a_odd, swap) = (word::choice_from_lsb(a_odd), word::choice_from_lsb(swap));
                 (a, b) = new_ab;
                 (m.r0, m.r1, m.pattern) = (
                     (
