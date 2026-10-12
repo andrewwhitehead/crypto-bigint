@@ -63,15 +63,15 @@ impl GcdPair<'_> {
     /// # Approach
     ///
     /// Each round reads a top-bit-aligned magnitude window of `a`/`b` via
-    /// [`Self::scheduled_extract_compact_pair`] (deferred sign -- `a`/`b` are tracked as
+    /// [`scheduled_extract_compact_pair`] (deferred sign -- `a`/`b` are tracked as
     /// two's-complement values across rounds for efficiency),
     /// turns it into a `SPLIT_BATCH_SIZE`-step matrix via [`bingcd::partial_xgcd`], and applies
     /// it to the inputs. Once the window size drops to the small size threshold, the inputs
     /// are renormalized to non-negative, then [`Self::gcd_small`] takes over
     /// using an exact (non-scheduled) extraction.
     ///
-    /// The extraction position walks a schedule that starts one batch's worth of bits below full
-    /// width and falls by half of whatever's been consumed so far every round unconditionally.
+    /// The extraction position is `E - W`, where `E = (k_remain + 1) / 2` is read before each
+    /// batch is charged, so it depends only on the public step budget.
     #[inline(always)]
     #[allow(clippy::cast_possible_truncation)]
     pub const fn gcd<const JACOBI: bool>(&mut self) -> Word {
@@ -220,8 +220,8 @@ impl GcdPair<'_> {
     /// Two stages, matching [`Self::gcd`]'s own split:
     ///
     /// Stage 1 (`self.len > SMALL_THRESHOLD_LIMBS`) is the deferred-sign loop. Each batch extracts
-    /// a top-bit-aligned magnitude window of `a`/`b` via [`Self::scheduled_extract_compact_pair`],
-    /// walking an unconditionally-moving schedule position. It them turns the extraction into a
+    /// a top-bit-aligned magnitude window of `a`/`b` via [`scheduled_extract_compact_pair`] at the
+    /// scheduled position `E - W`. It then turns the extraction into a
     /// `SPLIT_BATCH_SIZE`-step [`bingcd::BingcdMatrix`] via [`bingcd::partial_xgcd`], and applies it
     /// to `(a, b)`. `(u, v)` are updated by the same column-sign-adjusted matrix (captured as
     /// `a_neg`/`b_neg` before that update changes `a`/`b`'s own sign).
@@ -267,7 +267,7 @@ impl GcdPair<'_> {
         }
 
         // Stage 1 -> Stage 2 transition: normalize `(a, b)`. Stage 2 needs both operands non-negative
-        // to safely use the exact, non-deferred-sign `top_window_pair` extraction. Skipped when
+        // to safely use the exact, non-deferred-sign `extract_compact_pair` extraction. Skipped when
         // Stage 1 did not run at all as the terms are guaranteed non-negative.
         if self.b.nlimbs() > self.len {
             let a_ext = ExtendedIntRef::new(self.a.leading_mut(self.len), a_hi);
@@ -470,10 +470,10 @@ const fn top_window_words(lo: (Word, Word), hi: (Word, Word)) -> (Word, Word, u3
 /// comparable regardless of sign. They are normalised by a single shared shift,
 /// `min(clz(a_trip | b_trip), 2W)`.
 ///
-/// The cap at `2W` limits the shift; without it, operands below `W` would normalised
-/// past their own base and the low bits filled with fabricated zeros. With the cap
-/// the extraction error is under one ulp, however full the window is under two for
-/// a negative operand, whose one's-complement magnitude is `|x| - 1`.
+/// The cap at `2W` limits the shift; without it, operands below `W` would be
+/// normalised past their own base, with the low bits filled by fabricated zeros.
+/// With the cap the extraction error is under one ulp, or under two for a
+/// negative operand, whose one's-complement magnitude is `|x| - 1`.
 ///
 /// # Overflow
 ///
@@ -486,10 +486,11 @@ const fn top_window_words(lo: (Word, Word), hi: (Word, Word)) -> (Word, Word, u3
 /// Under the invariant `Phi <= 2E` the smaller operand satisfies `m <= E`,
 /// which is below the window top, so at most one flag can fire and the
 /// substitution always yields exactly one `MAX` and one zero. That ordering
-/// then holds for every step of the batch rather than just the first: a step
-/// replaces the larger operand and leaves the other untouched, so nothing can
-/// make the zero side nonzero, and `MAX` survives `S` halvings for any
-/// `S <= W - 1`.
+/// then holds for every step of the batch rather than just the first: a halving
+/// keeps a zero word zero, and a subtract either reduces the marker's word or
+/// swaps the zero word, unchanged, into `b`. The marker loses at most one bit per
+/// step, so at the batch's last comparison it is still at least
+/// `MAX >> (S - 1) = 2^(q+2) - 1`, above the halt threshold `2^q`.
 #[inline(always)]
 pub const fn scheduled_extract_compact_pair(
     a: &ExtendedIntRef<'_>,

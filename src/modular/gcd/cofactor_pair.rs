@@ -2,7 +2,7 @@ use super::{ExtendedIntRef, SignedLimbMatrix, extended_int_ref::hi_overflow_vart
 use crate::{Choice, Limb, Odd, UintRef};
 
 /// Tracks a pair of Bezout-style coefficients (`u`, `v`) mod a fixed odd modulus `y`, updated in
-/// lockstep with a caller's own running `(g, f)`-style GCD state by feeding it each round's
+/// lockstep with a caller's own running `(a, b)` GCD state by feeding it each round's
 /// coefficient-update matrix. Shared by both the constant-time and vartime xgcd engines.
 pub struct CofactorPair<'a> {
     /// Low limbs of the first tracked coefficient.
@@ -92,18 +92,14 @@ impl<'a> CofactorPair<'a> {
 
     /// Materializes the round-0 identity state `(u, v) = (1, 0)` and `m` in one step: rather than
     /// actually multiplying `m` by that trivial vector, assigns `m`'s first column straight to
-    /// `(u, v)` -- `r0.0*1 + r0.1*0 = r0.0` and `r1.0*1 + r1.1*0 = r1.0` -- since [`Self::new`]
-    /// never materializes that starting `1` in `u`'s buffer at all (`len == 0` is the sentinel
-    /// for it).
+    /// `(u, v)` -- `r0.0*1 + r0.1*0 = r0.0` and `r1.0*1 + r1.1*0 = r1.0` -- since the starting
+    /// `1` is outside the live window until then (`len == 0` is the sentinel for it).
     ///
     /// Still runs the same growth-schedule accounting a normal round would via
     /// [`Self::apply_matrix`]'s own growth block, so [`Self::cap_remain`]/[`Self::k_deferred`]
-    /// come out exactly as if `u` had started genuinely materialized at `len == 1` and this round
-    /// had gone through [`Self::wrapping_apply_matrix`] like any other -- required for later
-    /// rounds' own growth decisions to stay correct. [`SignedLimb`](super::matrix::SignedLimb)'s
-    /// own invariant (never more than one limb's magnitude) guarantees this round's growth always
-    /// fits the freshly-reset `cap_remain`, so the `grow_to` branch is unreachable in practice, but
-    /// is kept for symmetry with [`Self::apply_matrix`] rather than assumed away.
+    /// come out as later rounds' own growth decisions require. With `cap_remain` starting at `0`,
+    /// the first round always takes the `grow_to` branch, opening the one-limb window and leaving
+    /// `Limb::BITS - (k + 1)` bits of headroom.
     #[inline(always)]
     const fn set_from_matrix(&mut self, m: SignedLimbMatrix, k: u32) {
         if !self.is_full() {
@@ -193,10 +189,10 @@ impl<'a> CofactorPair<'a> {
     }
 
     /// Conditionally apply any pending modular division by `2^k` to both `u` and `v`. Called at
-    /// the *start* of [`Self::apply_matrix`], reducing whatever was left pending by the previous
-    /// round -- so the last round the caller's loop ever makes leaves its own shift untouched
-    /// here; that final backlog is picked up by [`Self::finalize`] instead, which only needs to
-    /// pay for `v`.
+    /// the *start* of [`Self::apply_matrix`] and [`Self::half_apply_matrix`], reducing whatever was
+    /// left pending by the previous round -- so the last round the caller's loop ever makes leaves its
+    /// own shift untouched here; that final backlog is picked up by [`Self::finalize`] instead, which
+    /// only needs to pay for `v`.
     ///
     /// No-op while the tracked window can still grow (`len < u.nlimbs()`): there's no need to pay
     /// for a mod-`y` reduction as long as overflow can simply be absorbed by widening the window
@@ -370,9 +366,10 @@ impl<'a> CofactorPair<'a> {
         self.wrapping_half_apply_matrix(m, k);
     }
 
-    /// Folds an extra pending shift `k` into the tracked total directly, without applying any
-    /// matrix -- for a caller that strips some steps (e.g. common trailing zero bits) up front,
-    /// outside the normal per-round matrix-apply loop.
+    /// Folds an extra pending shift `k` into the deferred backlog, without applying any matrix --
+    /// for a caller that strips factors of two from `a` up front, before the first matrix. The
+    /// cofactors are still the implicit `(1, 0)` then, with no window to divide, so the division
+    /// is left for [`Self::finalize`] to pay on `v` alone.
     #[inline(always)]
     pub const fn defer_k(&mut self, k: u32) {
         self.k_deferred += k;

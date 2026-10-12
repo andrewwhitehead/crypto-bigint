@@ -104,8 +104,8 @@ impl ExtendedIntRef<'_> {
         self.hi = self.hi.wrapping_add(c);
     }
 
-    /// Conditionally negates `self` in place, returning the carry from negating `lo` (nonzero
-    /// iff `lo` was zero).
+    /// Conditionally negates `self` in place, returning the carry out of the full negation
+    /// (computed whether or not it is applied; nonzero iff `self` is zero).
     #[inline(always)]
     pub const fn conditional_carrying_neg_assign(&mut self, apply: Choice) -> Limb {
         let mut c = self.lo.conditional_carrying_neg_assign(apply);
@@ -159,9 +159,9 @@ impl ExtendedIntRef<'_> {
     }
 
     /// Performs one Montgomery-style division step: adds a multiple of `m` to zero out the low
-    /// `k` bits (`k <= Limb::BITS`) of `self`, then shifts right by `k`, dividing `self` by
-    /// `2^k` modulo `m`. `m_inv` must equal `-m^-1 mod 2^k`. This does not necessarily guarantee a
-    /// result in the range [0, m).
+    /// `k` bits (`0 < k < Limb::BITS`) of `self`, then shifts right by `k`, dividing `self` by
+    /// `2^k` modulo `m`. `m_inv` must equal `m^-1 mod 2^k` (e.g. `m^-1 mod 2^Limb::BITS`). This
+    /// does not necessarily guarantee a result in the range [0, m).
     #[inline(always)]
     pub const fn limb_div2k_mod_assign(&mut self, m: &Odd<UintRef>, m_inv: Limb, k: u32) {
         let was_neg = self.is_negative();

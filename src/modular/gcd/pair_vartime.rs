@@ -86,18 +86,21 @@ impl GcdPairVartime<'_> {
     /// Reduces `(a, b)` to `gcd(a, b)` in `b` exactly like [`Self::gcd_odd`], but additionally
     /// accumulates coefficients into `cofactors` -- tracked relative to `cofactors`'s own fixed
     /// odd modulus `y`, used only for its on-demand reductions, not part of the core gcd
-    /// computation itself -- so that they end up satisfying the same `coefficient * a_orig ≡ gcd
-    /// (mod y)` relationship `raw_xgcd_odd`'s `d` does. Unlike `gcd_odd`, this does *not* fast-path
-    /// through `strip_trailing_zeros` every round: only a single upfront strip (`init_k`) happens,
-    /// with its count folded directly into `cofactors.k` (cheaper than a full matrix round for a
-    /// pure shift); every factor of two after that is left for `reduce_bingcd`'s own batched
-    /// matrix to account for, since a bare shift on `a` alone -- correct for `gcd_odd`'s
-    /// magnitude-only goal -- would silently desynchronize `cofactors` from `(a, b)`'s evolving
-    /// linear relationship. Also skips the `len <= 2` closed-form fast path `gcd_odd` uses, since
-    /// that path doesn't produce a matrix for `cofactors` to consume.
+    /// computation itself -- so that `v` ends up satisfying `v * a_orig ≡ gcd (mod y)`, as in the
+    /// constant-time [`GcdPair::raw_xgcd`](super::GcdPair::raw_xgcd). Unlike `gcd_odd`, this does
+    /// *not* fast-path through `strip_trailing_zeros` every round: only a single upfront strip
+    /// happens, with its count folded into `cofactors.k_deferred`, since the cofactors still hold
+    /// their implicit starting `(1, 0)` and there is no window yet to divide (the division
+    /// commutes with the later matrices, so [`CofactorPair::finalize_vartime`] pays it on `v`
+    /// alone); every factor of two after that is left for
+    /// `reduce_bingcd`'s own batched matrix to account for, since a bare shift on `a` alone --
+    /// correct for `gcd_odd`'s magnitude-only goal -- would silently desynchronize `cofactors`
+    /// from `(a, b)`'s evolving linear relationship. Also skips the `len == 1` single-word fast
+    /// path `gcd_odd` uses, since that path doesn't produce a matrix for `cofactors` to consume.
     #[inline(always)]
     pub const fn raw_xgcd<'a>(&mut self, cofactors: &mut CofactorPair<'a>) {
-        // 'u' is zero at this point, so a left shift would do nothing.
+        // The cofactors are still the implicit `(1, 0)`, so the division by `2^tz` this strip
+        // owes them can't be applied yet: defer it to `finalize`.
         cofactors.defer_k(self.strip_trailing_zeros());
 
         loop {
@@ -114,8 +117,6 @@ impl GcdPairVartime<'_> {
 
             cofactors.apply_matrix_vartime(m, mk);
         }
-
-        // FIXME - better handling of single limb reduction
     }
 
     /// Runs one batched round of `max_batch` (or fewer, if the top-window comparison stops being
@@ -125,19 +126,15 @@ impl GcdPairVartime<'_> {
     /// The matrix itself is built from a top-bit-aligned window of `a`/`b` (`a_top`/`b_top`,
     /// normalized so their combined leading-zero count is `0` by shifting in bits from the next
     /// limb down when the current top limb is short) paired with their exact low limb, fed to
-    /// [`bingcd::partial_xgcd_vartime`] -- the same
-    /// top-bit-windowing approach [`jacobi_symbol`](super::jacobi_symbol) uses for
-    /// its own constant-time batches, but with an `exact` flag driven by whether `top` itself fits
-    /// a single limb (`top < Limb::BITS`) rather than the constant-time versions' schedule-derived
-    /// `exact`/`above_threshold` machinery, since vartime execution can just re-measure the window fresh
-    /// every round instead of trusting a stale one.
+    /// [`bingcd::partial_xgcd_vartime`]. Unlike the constant-time path's scheduled extraction, the
+    /// window is re-measured from the actual data every round, and `exact` is simply whether the
+    /// tracked window is a single limb (`len == 1`).
     ///
-    /// After applying, `a`/`b` are independently renormalized to non-negative (each possibly
-    /// needing its own row of the matrix negated to match, so a caller composing matrices across
-    /// rounds -- like [`Self::raw_xgcd`]'s `cofactors` -- stays correct), shifted right by the
-    /// round's consumed step count, and the returned `SignedLimbMatrix` reflects those same
-    /// per-row negations. Returns `(matrix, steps_consumed, jacobi_neg)`; `gcd_odd`/`raw_xgcd`
-    /// ignore `jacobi_neg`, `jacobi_symbol` folds it into its running sign.
+    /// After applying, `b` is always non-negative; `a` is renormalized to non-negative if needed,
+    /// with the matrix's top row negated to match (so a caller composing matrices across rounds --
+    /// like [`Self::raw_xgcd`]'s `cofactors` -- stays correct). Both are then shifted right by the
+    /// round's consumed step count. Returns `(matrix, steps_consumed, jacobi_neg)`;
+    /// `gcd_odd`/`raw_xgcd` ignore `jacobi_neg`, `jacobi_symbol` folds it into its running sign.
     #[inline(always)]
     #[allow(clippy::cast_possible_truncation)]
     const fn reduce_bingcd(&mut self, max_batch: u32) -> (SignedLimbMatrix, u32, Word) {
@@ -199,8 +196,9 @@ impl GcdPairVartime<'_> {
         ((self.a.limbs[0].0, a_top.0), (self.b.limbs[0].0, b_top.0))
     }
 
-    /// Divides `a` by its own trailing-zero-bit factor of two (a no-op, returning `0`, once `a` has
-    /// already reached zero), shrinking `a_bits` to match, and returns the count stripped. Sound
+    /// Divides `a` by its own trailing-zero-bit factor of two, shrinking `a_bits` to match, and
+    /// returns the count stripped. A no-op returning `0` once `a` has reached zero, or when there
+    /// are fewer than `Word::BITS / 4` trailing zeros (left for the next batch to absorb). Sound
     /// as a magnitude-only operation (`gcd_odd`) because `b` stays odd throughout, so factors of
     /// two can only ever come from `a`; callers that also need a coefficient consistent with the
     /// stripped value (`raw_xgcd`) must fold the returned count in themselves rather than treating
@@ -224,9 +222,10 @@ impl GcdPairVartime<'_> {
     }
 
     /// Shrinks the tracked window while both `a`'s and `b`'s current top limb are exactly zero
-    /// (vartime checks against the *actual* data, unlike `safegcd`'s public-step-count-only
-    /// schedule). Never grows `len` back -- only ever called after a round has just narrowed `a`,
-    /// so re-widening isn't needed here the way [`CofactorPair`]'s own growth needs it.
+    /// (vartime checks against the *actual* data, unlike the constant-time
+    /// [`GcdPair`](super::GcdPair)'s public-step-count-only schedule). Never grows `len` back --
+    /// only ever called after a round has just narrowed `a`, so re-widening isn't needed here the
+    /// way [`CofactorPair`]'s own growth needs it.
     #[inline(always)]
     const fn truncate(&mut self) {
         while self.len > 1

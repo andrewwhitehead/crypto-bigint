@@ -51,8 +51,8 @@ impl BingcdMatrix {
 
     /// Apply the matrix to `a`/`b`, leaving them in a non-negative state.
     ///
-    /// Returns a pair of flags indicating whether `a` or `b` would be negative
-    /// if [`Self::wrapping_apply_shift`] were used instead.
+    /// Returns a pair of flags indicating whether `a` or `b` was negated, i.e. whether that row's
+    /// signed result came out negative.
     #[inline(always)]
     pub const fn wrapping_apply_unsigned_shift(
         &self,
@@ -89,8 +89,8 @@ impl BingcdMatrix {
     /// own column sign the way a genuine signed operand can (they're coefficients, not the signed
     /// `(a, b)` the matrix was derived from), so the caller passes `a_neg`/`b_neg` in directly:
     /// column 0 (`r0.0`, `r1.0`) picks up `a`'s sign, column 1 (`r0.1`, `r1.1`) picks up `b`'s,
-    /// exactly like [`Self::wrapping_apply_shift_signed`] does for `(a, b)` themselves. Capture
-    /// `a_neg`/`b_neg` (e.g. from `a.is_negative()`/`b.is_negative()`) *before* applying the matrix
+    /// exactly like [`Self::wrapping_apply_sign_correcting_shift`] does for `(a, b)` themselves.
+    /// Capture `a_neg`/`b_neg` (e.g. from `a.is_negative()`/`b.is_negative()`) *before* applying the matrix
     /// to `(a, b)`, since that application changes their sign, and this needs the value from
     /// *before* it.
     #[inline(always)]
@@ -109,20 +109,14 @@ impl BingcdMatrix {
 
     /// [`Self::column_signed_limb_matrix`]'s counterpart for a coefficient pair updated alongside
     /// `(a, b)` *after* an unsigned, row-combined-sign apply
-    /// ([`Self::wrapping_apply_shift_unsigned`]/[`SignedLimbMatrix::wrapping_apply_unsigned`])
-    /// rather than a deferred-sign one -- that shortcut forces each row's own result to its
-    /// absolute value independently, silently flipping the *entire row* (not a column) whenever
-    /// that row's raw computation came out negative, exactly the `(a_neg, b_neg)`
-    /// `wrapping_apply_shift_unsigned` itself already returns. A coefficient pair updated via a
-    /// *column*-adjusted matrix (as if `a`/`b` had never needed correcting) tracks the
-    /// pre-correction, occasionally wrong-signed row result instead -- confirmed directly via the
-    /// `d * a ≡ f (mod y)` trace on a real failing case: `d`/`e`'s own row-0/row-1 entries came out
-    /// exactly negated relative to what the stored (always non-negative) `a`/`b` actually equal,
-    /// whenever `wrapping_apply_shift_unsigned`'s returned flag for that row was `true`. Row 0
-    /// (`r0.0`, `r0.1`) flips on `a_neg`, row 1 (`r1.0`, `r1.1`) on `b_neg` -- the
-    /// mirror-image split of `column_signed_limb_matrix`'s column-based one. Capture
-    /// `a_neg`/`b_neg` from the *same* `wrapping_apply_shift_unsigned` call this matrix
-    /// was just used for -- feeding it a mismatched matrix/flags pair silently miscorrects.
+    /// ([`Self::wrapping_apply_unsigned_shift`]/[`SignedLimbMatrix::wrapping_apply_unsigned`])
+    /// rather than a deferred-sign one. That apply forces each row's result to its absolute value
+    /// independently, flipping the *entire row* (not a column) whenever that row's signed result
+    /// came out negative -- exactly the `(a_neg, b_neg)` it returns. A coefficient pair must track
+    /// the stored (non-negative) `a`/`b`, so row 0 (`r0.0`, `r0.1`) flips on `a_neg` and row 1
+    /// (`r1.0`, `r1.1`) on `b_neg`: the mirror image of `column_signed_limb_matrix`'s
+    /// column-based split. Capture `a_neg`/`b_neg` from the *same* `wrapping_apply_unsigned_shift`
+    /// call this matrix was just used for -- a mismatched matrix/flags pair silently miscorrects.
     #[inline(always)]
     pub(crate) const fn row_signed_limb_matrix(
         self,
@@ -226,11 +220,13 @@ pub(crate) const fn gcd_word_vartime(mut a: Word, mut b: Word) -> (Word, Word) {
 /// `exact` marks whether `hi` can be trusted to reflect every comparison exactly for the whole
 /// batch (e.g. because the tracked value fits entirely within it). When `HALTING` is `false`, all
 /// `steps` iterations run unconditionally, exactly as `exact = TRUE` would. When `HALTING` is
-/// `true` and `exact` is not set, each step additionally checks whether the shrinking `hi`
-/// magnitude has dropped below [`SPLIT_THRESHOLD_BITS`]; once it has, further subtract/swap
-/// decisions on `a`/`b` stop for the remainder of the batch (though `a`'s residual trailing-zero
-/// shift keeps draining into the matrix) -- the caller must then re-extract a fresh window and
-/// retry with a smaller batch.
+/// `true` and `exact` is not set, each subtract step additionally checks whether the absolute
+/// high-word difference `|ah - bh|` has fallen below `2^SPLIT_THRESHOLD_BITS` (a banded step).
+/// Right after the first such step the batch halts: no further subtractions are made, and both
+/// matrix rows are scaled by `2^(steps - real_steps)` (the bottom row by its per-step doubling,
+/// the top row by a final shift), which the `>> matrix.k` on application divides back out. The
+/// batch is therefore still charged as `steps` steps (`matrix.k == steps`) while leaving
+/// `(a, b)` exactly where the halting step left them; there is no retry.
 ///
 /// Returns `(matrix, jacobi_neg, unhalted)`: `jacobi_neg` is the low bit of the accumulated Jacobi
 /// symbol sign flips, and `unhalted` reports whether the batch ran to completion (`TRUE`) rather
@@ -324,9 +320,8 @@ pub const fn partial_xgcd<const HALTING: bool>(
 /// unconditionally (no halting -- callers only reach this once the tracked window already fits a
 /// single word) and accumulates the resulting [`BingcdMatrix`].
 ///
-/// Returns `(b, matrix, jacobi_neg)`: `b` is the resulting value of the second operand (`gcd(a,
-/// b)` once `steps` covers the whole remaining reduction), and `jacobi_neg` is the low bit of the
-/// accumulated Jacobi symbol sign flips.
+/// Returns `(b, matrix)`: `b` is the resulting value of the second operand (`gcd(a, b)` once
+/// `steps` covers the whole remaining reduction).
 #[inline(always)]
 #[must_use]
 #[allow(clippy::cast_possible_truncation)]
@@ -447,11 +442,12 @@ pub const fn partial_xgcd_vartime(
 
 #[cfg(test)]
 mod tests {
-    /// Validates `partial_xgcd` against a trusted reference built by literally
-    /// running `step_word` `SPLIT_BATCH_SIZE` times and accumulating a matrix
-    /// the same way `partial_xgcd` does -- for `a`, `b` that fit in a single word
-    /// (so `a_hi=a_lo=a`, `b_hi=b_lo=b` is the correct split-form representation,
-    /// the two should be identical.
+    /// Validates the batch functions (`partial_xgcd`, `partial_xgcd_word` and
+    /// `partial_xgcd_vartime`) against a trusted reference built by literally
+    /// running `step_word` `steps` times and accumulating a matrix the same way
+    /// `partial_xgcd` does -- for `a`, `b` that fit in a single word (so
+    /// `a_hi=a_lo=a`, `b_hi=b_lo=b` is the correct split-form representation, and
+    /// the window is exact), the results should be identical.
     #[cfg(feature = "rand_core")]
     #[test]
     fn partial_xgcd_matches_elementary_steps() {
@@ -459,14 +455,21 @@ mod tests {
         use chacha20::ChaCha8Rng;
         use rand_core::SeedableRng;
 
-        fn trusted_matrix(mut a: Word, mut b: Word) -> super::BingcdMatrix {
+        /// Returns the accumulated matrix, the final `b`, and the low bit of the Jacobi sign.
+        fn trusted_matrix(
+            mut a: Word,
+            mut b: Word,
+            steps: u32,
+        ) -> (super::BingcdMatrix, Word, Word) {
             let mut m = super::BingcdMatrix::UNIT;
-            m.k = SPLIT_BATCH_SIZE;
+            m.k = steps;
+            let mut jacobi_neg = 0;
             let mut i = 0;
             while i < m.k {
                 use crate::word;
 
-                let (new_ab, a_odd, swap, _) = super::step_word(a, b, 0);
+                let (new_ab, a_odd, swap);
+                (new_ab, a_odd, swap, jacobi_neg) = super::step_word(a, b, jacobi_neg);
                 let (a_odd, swap) = (word::choice_from_lsb(a_odd), word::choice_from_lsb(swap));
                 (a, b) = new_ab;
                 (m.r0, m.r1, m.pattern) = (
@@ -482,7 +485,7 @@ mod tests {
                 );
                 i += 1;
             }
-            m
+            (m, b, jacobi_neg & 1)
         }
 
         let mut rng = ChaCha8Rng::seed_from_u64(1);
@@ -490,14 +493,19 @@ mod tests {
             let a = Uint::<1>::random_from_rng(&mut rng).limbs[0].0;
             let b = Uint::<1>::random_from_rng(&mut rng).limbs[0].0 | 1;
 
-            let expected = trusted_matrix(a, b);
+            let (expected, _, expected_j) = trusted_matrix(a, b, SPLIT_BATCH_SIZE);
 
             // `HALT = false`: unconditional, matches the trusted reference unconditionally.
-            let (actual, _, _) =
+            let (actual, j, _) =
                 super::partial_xgcd::<false>((a, a), (b, b), Choice::FALSE, SPLIT_BATCH_SIZE);
             assert_eq!(
-                (expected.r0, expected.r1, expected.pattern.to_bool()),
-                (actual.r0, actual.r1, actual.pattern.to_bool()),
+                (
+                    expected.r0,
+                    expected.r1,
+                    expected.pattern.to_bool(),
+                    expected_j
+                ),
+                (actual.r0, actual.r1, actual.pattern.to_bool(), j),
                 "HALT=false a={a:#x} b={b:#x}"
             );
 
@@ -505,21 +513,72 @@ mod tests {
             // whole value fits its register, `hi == lo` exactly), so `above_threshold` should hold
             // every step regardless of the margin -- output should match the trusted reference exactly,
             // and `active` should end up `TRUE` (never froze).
-            let (actual_halt, _j, active) =
+            let (actual_halt, j, active) =
                 super::partial_xgcd::<true>((a, a), (b, b), Choice::TRUE, SPLIT_BATCH_SIZE);
             assert!(
                 active.to_bool(),
                 "a={a:#x} b={b:#x}: froze despite exact=TRUE"
             );
             assert_eq!(
-                (expected.r0, expected.r1, expected.pattern.to_bool()),
+                (
+                    expected.r0,
+                    expected.r1,
+                    expected.pattern.to_bool(),
+                    expected_j
+                ),
                 (
                     actual_halt.r0,
                     actual_halt.r1,
-                    actual_halt.pattern.to_bool()
+                    actual_halt.pattern.to_bool(),
+                    j
                 ),
                 "HALT=true a={a:#x} b={b:#x}"
             );
+
+            // Vartime, `exact = true`: skips runs of trailing zeros at once, but an exact window
+            // never stops early, so it consumes the full batch with the same decisions.
+            let (actual_vt, j) =
+                super::partial_xgcd_vartime((a, a), (b, b), SPLIT_BATCH_SIZE, true);
+            assert_eq!(
+                (
+                    expected.r0,
+                    expected.r1,
+                    expected.pattern.to_bool(),
+                    expected.k,
+                    expected_j
+                ),
+                (
+                    actual_vt.r0,
+                    actual_vt.r1,
+                    actual_vt.pattern.to_bool(),
+                    actual_vt.k,
+                    j
+                ),
+                "vartime a={a:#x} b={b:#x}"
+            );
+
+            // Single-word tail: unconditional steps up to its own longer batch size.
+            for steps in [SPLIT_BATCH_SIZE, super::super::WORD_BATCH_SIZE] {
+                let (expected, expected_b, _) = trusted_matrix(a, b, steps);
+                let (actual_b, actual_w) = super::partial_xgcd_word(a, b, steps);
+                assert_eq!(
+                    (
+                        expected.r0,
+                        expected.r1,
+                        expected.pattern.to_bool(),
+                        expected.k,
+                        expected_b
+                    ),
+                    (
+                        actual_w.r0,
+                        actual_w.r1,
+                        actual_w.pattern.to_bool(),
+                        actual_w.k,
+                        actual_b
+                    ),
+                    "word steps={steps} a={a:#x} b={b:#x}"
+                );
+            }
         }
     }
 }

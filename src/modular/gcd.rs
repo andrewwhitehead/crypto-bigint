@@ -15,14 +15,18 @@ pub(super) use self::{
     pair_vartime::GcdPairVartime,
 };
 
-/// Maximum number of elementary binary GCD steps [`partial_xgcd`] performs per batch.
+/// Number of elementary binary GCD steps in each [`bingcd::partial_xgcd`] batch (an upper bound
+/// on the vartime path, whose batches may stop early). Leaves the `SPLIT_THRESHOLD_BITS + 1` gap
+/// bits that the drift bound requires; see `docs/binary-gcd.md`, Appendix B.
 pub(super) const SPLIT_BATCH_SIZE: u32 = Word::BITS - SPLIT_THRESHOLD_BITS - 1;
 
 /// Maximum batch length for [`bingcd::partial_xgcd_word`] -- the tail's single-word branch, where
 /// the tracked operands fit one limb.
 const WORD_BATCH_SIZE: u32 = Word::BITS - 2;
 
-/// Ambiguity band for [`partial_xgcd`]'s `HALT = true` divergence check.
+/// Width `q` of the ambiguity band for [`bingcd::partial_xgcd`]'s `HALTING` check: a subtract
+/// step with `|ah - bh| < 2^q` may have compared the compact words in the wrong order, so the
+/// batch halts after it.
 const SPLIT_THRESHOLD_BITS: u32 = match cpubits::CPUBITS {
     32 => 4,
     64 => 5,

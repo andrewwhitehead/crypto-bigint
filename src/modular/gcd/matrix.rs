@@ -5,7 +5,7 @@ use crate::{Choice, Limb, UintRef};
 
 /// A [`Limb`] paired with an explicit sign -- sign-magnitude representation, as opposed to
 /// `Limb`'s own two's-complement wrapping arithmetic. Used as [`SignedLimbMatrix`]'s entries: the
-/// various per-batch gcd matrices (`bingcd`'s, `safegcd`'s) need genuinely negative coefficients,
+/// per-batch gcd matrices need genuinely negative coefficients,
 /// but only ever within a single limb's magnitude, so tracking the sign alongside a plain
 /// non-negative `Limb` is cheaper than reasoning about `Limb`'s wraparound directly.
 #[derive(Debug, Copy, Clone)]
@@ -55,13 +55,11 @@ impl PartialEq for SignedLimb {
 }
 
 /// A 2x2 matrix of [`SignedLimb`] entries, applied as a linear transform to a pair of big
-/// integers: `(a, b) -> (r0.0*a + r0.1*b, r1.0*a + r1.1*b)`. The shared representation `bingcd`'s
-/// (`BingcdMatrix`) and `safegcd`'s (`SafegcdMatrix`) own, differently-shaped per-batch matrices
-/// both convert into before actually applying themselves -- either to the evolving `f`/`g` gcd
-/// state directly, or (`vartime.rs`'s own coefficient-pair tracker) to a running composed
-/// coefficient matrix instead. See [`Self::wrapping_apply`], [`Self::wrapping_apply_unsigned`],
-/// and [`Self::wrapping_half_apply`] for the different operand-signedness/completeness tradeoffs
-/// each apply variant makes.
+/// integers: `(a, b) -> (r0.0*a + r0.1*b, r1.0*a + r1.1*b)`. The form `bingcd`'s per-batch
+/// `BingcdMatrix` converts into before being applied -- either to the evolving `(a, b)` gcd
+/// state directly, or to the cofactors tracked by [`CofactorPair`](super::CofactorPair). See
+/// [`Self::wrapping_apply`], [`Self::wrapping_apply_unsigned`], and [`Self::wrapping_half_apply`]
+/// for the different operand-signedness/completeness tradeoffs each apply variant makes.
 #[derive(Debug, Copy, Clone)]
 pub struct SignedLimbMatrix {
     /// Top row: computes the new `a`.
@@ -137,7 +135,7 @@ impl SignedLimbMatrix {
         // non-negative regardless of which "side" produced it, but the XOR flips it to `true`
         // whenever `row.1.sign` is set and the pre-abs value happened to be zero (its own
         // `pre_neg` is `false` either way, since zero has no sign bit set). Masking by `nonzero`
-        // (read off the abs's own negation carry -- see `abs_assign_reporting_nonzero`) corrects
+        // (read off the abs's own negation carry -- see `abs_assign_carry`) corrects
         // that one case without disturbing any other.
         let a_negated = a_pre_neg.xor(r0.1.sign).and(a_carry.is_zero());
         let b_negated = b_pre_neg.xor(r1.1.sign).and(b_carry.is_zero());
