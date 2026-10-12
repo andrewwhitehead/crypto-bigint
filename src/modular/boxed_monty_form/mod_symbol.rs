@@ -1,4 +1,4 @@
-//! Modular symbol calculation for integers in Montgomery form with a constant modulus.
+//! Modular symbol calculation for integers in Montgomery form.
 
 use crate::JacobiSymbol;
 

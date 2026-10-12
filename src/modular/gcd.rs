@@ -38,7 +38,7 @@ const SPLIT_THRESHOLD_BITS: u32 = match cpubits::CPUBITS {
 /// behind the tracking window.
 pub const SMALL_THRESHOLD_LIMBS: usize = 8;
 
-/// Calculates the greatest common denominator of `a` and odd `b`, using the optimized
+/// Calculates the greatest common divisor of `a` and odd `b`, using the optimized
 /// batched Binary GCD algorithm.
 ///
 /// Thin wrapper around [`GcdPair::gcd`], always deriving its step budget
@@ -48,7 +48,7 @@ pub const fn gcd_odd(a: &mut UintRef, b: &mut UintRef) {
     pair.gcd::<false>();
 }
 
-/// Calculates the greatest common denominator of `a` and odd `b`, using the optimized
+/// Calculates the greatest common divisor of `a` and odd `b`, using the optimized
 /// batched Binary GCD algorithm.
 ///
 /// Thin wrapper around [`GcdPair::gcd_small`], always deriving its step
@@ -156,14 +156,17 @@ pub const fn jacobi_symbol_vartime(a: &mut UintRef, b: &mut UintRef) -> JacobiSy
 /// mod y`.
 ///
 /// Inputs:
-/// - `x`: value to invert, same width as `y`.
+/// - `x`: value to invert, at least as wide as `y` (it need not be reduced mod `y`).
 /// - `y`: odd modulus.
 /// - `y_inv`: `y`'s limb-sized modular inverse, as returned by `Odd<UintRef>::invert_mod_limb`.
-/// - `buf`: scratch, at least `3 * x.nlimbs()` limbs.
+/// - `buf`: scratch, at least `3 * x.nlimbs()` limbs; initial contents ignored.
 ///
 /// Outputs:
 /// - Returns a `Choice` that is true iff `x` is invertible mod `y` (`gcd(x, y) == 1 && x != 0`).
 /// - `x` holds `x^-1 mod y` when the returned `Choice` is true, otherwise its state is unspecified.
+///
+/// # Panics
+/// If `x` is narrower than `y`, or `buf` is too short.
 pub const fn invert_odd_mod<'a>(
     x: &'a mut UintRef,
     y: &'a Odd<UintRef>,
@@ -232,15 +235,10 @@ pub const fn invert_odd_mod_small<'a>(
 /// Computes the modular inverse of `x` modulo odd `y`, returning whether one exists (`gcd(x, y) ==
 /// 1` and `x != 0`). Variable-time analog of [`invert_odd_mod`].
 ///
-/// Inputs:
-/// - `x`: value to invert, must be no narrower than `y`.
-/// - `y`: odd modulus.
-/// - `y_inv`: `y`'s limb-sized modular inverse, as returned by `Odd<UintRef>::invert_mod_limb`.
-/// - `buf`: scratch, at least `3 * x.nlimbs()` limbs.
+/// Inputs and outputs are [`invert_odd_mod`]'s, except that the result is a `bool`.
 ///
-/// Outputs:
-/// - Returns a `bool` that is true iff `x` is invertible mod `y` (`gcd(x, y) == 1 && x != 0`).
-/// - `x` holds `x^-1 mod y` when the return value is true, otherwise its state is unspecified.
+/// # Panics
+/// If `x` is narrower than `y`, or `buf` is too short.
 pub const fn invert_odd_mod_vartime<'a>(
     x: &'a mut UintRef,
     y: &'a Odd<UintRef>,
@@ -368,26 +366,22 @@ pub const fn xgcd_vartime(
     buf: &mut UintRef,
 ) {
     assert!(y.is_odd().to_bool(), "y must be odd");
-    let y_limbs = y.nlimbs();
     let y_odd = Odd::new_ref_unchecked(y);
     let y_inv = y_odd.invert_mod_limb();
     let limbs = x.nlimbs();
-    let wide_len = if y_limbs > limbs { y_limbs } else { limbs };
 
     let (x_copy, rest) = buf.split_at_mut(limbs);
     x_copy.copy_from(x);
     gcd.copy_from(y_odd.as_ref());
     let mut pair = GcdPairVartime::new(x_copy, gcd);
 
-    let (u, rest) = rest.split_at_mut(wide_len);
-    let v = rest.leading_mut(wide_len);
+    let (u, rest) = rest.split_at_mut(limbs);
+    let v = rest.leading_mut(limbs);
     let mut cofactors = CofactorPair::new(u, v, y_odd, y_inv);
 
     // Perform the partial XGCD, populating `a`
     pair.raw_xgcd(&mut cofactors);
-    let v_final = cofactors.finalize_vartime();
-    debug_assert!(v_final.trailing(limbs).is_zero().to_bool());
-    a.copy_from(v_final.leading(limbs));
+    a.copy_from(cofactors.finalize_vartime());
 
     // Replace `x`, `y` with `x/gcd`, `y/gcd`
     x.div_exact_vartime(gcd);

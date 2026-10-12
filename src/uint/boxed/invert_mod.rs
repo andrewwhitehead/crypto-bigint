@@ -180,10 +180,6 @@ impl Odd<BoxedUint> {
     /// `self_inv` must be `self.as_uint_ref().invert_mod_limb()` -- computed by the caller since
     /// callers that already have it on hand (e.g. Montgomery params) would otherwise redo the
     /// computation on every call.
-    ///
-    /// `monty_form_r2` seeds the gcd loop's cofactor accumulator instead of starting it at `1`:
-    /// passing a Montgomery form's `R^2 mod self` computes the inverse of a Montgomery-encoded
-    /// `value` directly in Montgomery form in one pass, with no separate decode/re-encode step.
     #[inline]
     #[must_use]
     pub(crate) fn invert_mod_precomputed(
@@ -209,14 +205,9 @@ impl Odd<BoxedUint> {
     /// This method is variable-time with respect to `value`. `self_inv` must be
     /// `self.as_uint_ref().invert_mod_limb()`, computed by the caller (see
     /// [`Self::invert_mod_precomputed`]).
-    ///
-    /// Unlike [`Self::invert_mod_precomputed`], there is no cofactor-seeding capability here (the
-    /// underlying `invert_odd_mod_vartime` always starts its cofactor at `1`), so there's no
-    /// single-pass Montgomery-adjusted form -- callers that need one have to decode to the plain
-    /// domain first, invert there, then re-encode the result themselves.
     #[inline]
     #[must_use]
-    pub fn invert_mod_precomputed_vartime(
+    pub(crate) fn invert_mod_precomputed_vartime(
         &self,
         value: &BoxedUint,
         self_inv: Limb,

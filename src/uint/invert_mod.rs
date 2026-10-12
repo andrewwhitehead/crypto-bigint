@@ -289,7 +289,7 @@ impl<const LIMBS: usize> Odd<Uint<LIMBS>> {
     /// This method is variable-time with respect to `value`.
     #[inline(always)]
     #[must_use]
-    pub const fn invert_mod_precomputed_vartime(
+    pub(crate) const fn invert_mod_precomputed_vartime(
         &self,
         value: &Uint<LIMBS>,
         self_inv: Limb,

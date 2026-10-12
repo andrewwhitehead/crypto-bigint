@@ -155,7 +155,7 @@ impl UintRef {
         while i != 0 {
             i -= 1;
             let l = self.limbs[i];
-            let z = l.trailing_ones();
+            let z = l.leading_ones();
             count += z;
             if z != Limb::BITS {
                 break;
@@ -323,11 +323,55 @@ impl BitOps for UintRef {
 #[cfg(test)]
 mod tests {
     use super::UintRef;
-    use crate::{BitOps, Limb};
+    use crate::{BitOps, Limb, U256};
+
+    fn uint_with_bits_at(positions: &[u32]) -> U256 {
+        let mut result = U256::ZERO;
+        for pos in positions {
+            result |= U256::ONE << *pos;
+        }
+        result
+    }
 
     #[test]
     fn bitops_bytes_precision_counts_bytes_not_limbs() {
         let limbs = [Limb::ZERO; 2];
         assert_eq!(UintRef::new(&limbs).bytes_precision(), 2 * Limb::BYTES);
+    }
+
+    #[test]
+    fn leading_zeros_vartime() {
+        let u = uint_with_bits_at(&[256 - 16, 256 - 79, 256 - 207]);
+        assert_eq!(u.as_uint_ref().leading_zeros_vartime(), 15);
+
+        let u = uint_with_bits_at(&[256 - 79, 256 - 207]);
+        assert_eq!(u.as_uint_ref().leading_zeros_vartime(), 78);
+
+        let u = uint_with_bits_at(&[256 - 207]);
+        assert_eq!(u.as_uint_ref().leading_zeros_vartime(), 206);
+
+        let u = uint_with_bits_at(&[256 - 1, 256 - 75, 256 - 150]);
+        assert_eq!(u.as_uint_ref().leading_zeros_vartime(), 0);
+
+        let u = U256::ZERO;
+        assert_eq!(u.as_uint_ref().leading_zeros_vartime(), 256);
+    }
+
+    #[test]
+    fn leading_ones_vartime() {
+        let u = !uint_with_bits_at(&[256 - 16, 256 - 79, 256 - 207]);
+        assert_eq!(u.as_uint_ref().leading_ones_vartime(), 15);
+
+        let u = !uint_with_bits_at(&[256 - 79, 256 - 207]);
+        assert_eq!(u.as_uint_ref().leading_ones_vartime(), 78);
+
+        let u = !uint_with_bits_at(&[256 - 207]);
+        assert_eq!(u.as_uint_ref().leading_ones_vartime(), 206);
+
+        let u = !uint_with_bits_at(&[256 - 1, 256 - 75, 256 - 150]);
+        assert_eq!(u.as_uint_ref().leading_ones_vartime(), 0);
+
+        let u = U256::MAX;
+        assert_eq!(u.as_uint_ref().leading_ones_vartime(), 256);
     }
 }

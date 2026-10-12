@@ -72,11 +72,21 @@ impl JacobiSymbol {
         Self::from_i8(negate.select_i64(j, -j) as i8)
     }
 
+    /// Convert a value in `{-1, 0, 1}` into a [`JacobiSymbol`].
+    ///
+    /// Designed for constant-time use: the conversion is a reinterpretation of the `i8`
+    /// discriminant rather than a `match`, which the compiler may lower to a secret-dependent
+    /// branch or table lookup. The range check only branches (to panic) on an invalid input,
+    /// never on which of the valid values was given.
+    ///
+    /// # Panics
+    /// If `value` is not `-1`, `0` or `1`.
     #[allow(unsafe_code)]
     pub(crate) const fn from_i8(value: i8) -> Self {
-        assert!(value.abs() & !1 == 0);
-        // SAFETY: supported values are checked by assertion
-        unsafe { transmute(value) }
+        assert!(value.abs() & !1 == 0, "invalid value for Jacobi symbol");
+        // SAFETY: `JacobiSymbol` is `#[repr(i8)]` with discriminants `-1`, `0` and `1`, and the
+        // assertion above restricts `value` to exactly those.
+        unsafe { transmute::<i8, Self>(value) }
     }
 }
 

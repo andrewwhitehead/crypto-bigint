@@ -162,6 +162,10 @@ impl GcdPair<'_> {
         // directly. The step counts are pure arithmetic on `self.k_remain`, settled before any
         // reduction runs, so each stage is a counted loop the compiler can fold to a constant
         // whenever `self.k_remain` is one, as it is for the fixed-`LIMBS` entry points.
+        //
+        // The tracked window deliberately stays at its starting width: at these sizes only the
+        // last few batches could run narrower, and a constant width lets the compiler unroll the
+        // extraction and matrix application, which measured faster than shrinking.
         let batches = if self.len == 1 {
             0
         } else {
@@ -180,11 +184,6 @@ impl GcdPair<'_> {
                 jacobi_neg,
             );
             i += 1;
-
-            if self.len != 1 && self.k_remain <= self.window_shrink_at {
-                self.len -= 1;
-                self.window_shrink_at -= Limb::BITS;
-            }
         }
 
         // Single-`Word` finish for the remaining reduction steps.
@@ -314,9 +313,7 @@ impl GcdPair<'_> {
     /// - `cofactors.v` ends up satisfying `v * a ≡ gcd(a, b) (mod y)`; call
     ///   [`CofactorPair::finalize`] to reduce it into `[0, y)`.
     ///
-    /// `window_shrink_at` is re-derived from `self.len` rather than threaded in: Stage 1 pairs
-    /// every `self.len -= 1` with a `Limb::BITS` decrement, so `(self.len - 1) * Limb::BITS` is
-    /// exactly the value it would have handed over.
+    /// Like [`Self::gcd_small`], the tracked window stays at the width Stage 1 left it at.
     ///
     /// `(a, b)` stay non-negative throughout (every round's `wrapping_apply_unsigned_shift`
     /// unconditionally re-corrects both) but `(u, v)`'s own update still needs the *row*-sign
@@ -340,11 +337,6 @@ impl GcdPair<'_> {
             let signed = matrix.row_signed_limb_matrix(a_neg, b_neg);
 
             cofactors.apply_matrix(signed, matrix.k);
-
-            if self.len != 1 && self.k_remain <= self.window_shrink_at {
-                self.len -= 1;
-                self.window_shrink_at -= Limb::BITS;
-            }
             i += 1;
         }
 

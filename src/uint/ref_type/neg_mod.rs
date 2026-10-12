@@ -1,5 +1,5 @@
 use super::UintRef;
-use crate::{Choice, Limb, NonZero};
+use crate::{Limb, NonZero};
 
 impl UintRef {
     /// Computes `-self mod p`.
@@ -7,22 +7,13 @@ impl UintRef {
     #[inline]
     #[track_caller]
     pub const fn wrapping_neg_mod_assign(&mut self, p: &NonZero<Self>) {
-        self.conditional_wrapping_neg_mod_assign(p, Choice::TRUE);
-    }
-
-    /// Computes `-a mod p`.
-    /// Assumes `self` is in `[0, p)`.
-    #[inline]
-    #[track_caller]
-    pub const fn conditional_wrapping_neg_mod_assign(&mut self, p: &NonZero<Self>, apply: Choice) {
         let p = p.as_ref();
         debug_assert!(self.bits_precision() >= p.bits_precision());
-        // If self is zero, then leave it untouched.
-        // Otherwise self would become `p` which is too large.
-        let apply = apply.and(self.is_nonzero());
 
+        // If self is zero, then leave it untouched: `!0 + 1` wraps back to zero, whereas adding
+        // `p` would leave `p`, which is too large.
         let mut i = 0;
-        let mask = Limb::choice_to_mask(apply);
+        let mask = Limb::choice_to_mask(self.is_nonzero());
         let mut carry = Limb::ONE;
 
         while i < p.limbs.len() {

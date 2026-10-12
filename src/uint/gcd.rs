@@ -53,8 +53,8 @@ impl<const LIMBS: usize> NonZeroUint<LIMBS> {
     pub const fn gcd_unsigned(&self, rhs: &Uint<LIMBS>) -> Self {
         let lhs = self.as_ref();
 
-        // Factor out common factors of two and ensure `f` is odd.
-        // There is no need to strip the zeros from `g`, as
+        // Factor out common factors of two and ensure `lhs` is odd.
+        // There is no need to strip the zeros from `rhs`, as
         // `gcd(a, b) == gcd(a, b•2^k)` for odd `a`.
         let lhs_tz = lhs.trailing_zeros();
         let k = u32_min(lhs_tz, rhs.trailing_zeros());
@@ -270,7 +270,7 @@ impl<const LIMBS: usize> OddUint<LIMBS> {
         );
         let gcd = gcd.to_odd().expect_copied("expected odd GCD");
 
-        // Mirrors `safexgcd`'s exact sign-minimization post-processing (same arithmetic, vartime
+        // Mirrors `xgcd_unsigned`'s sign-minimization post-processing (same arithmetic, vartime
         // comparisons here): `a` was specifically chosen to be non-zero so that `b` is positive;
         // minimize both `|a|` and `|b|` by allowing negative `a`, conditionally subtracting
         // `y/gcd` from `a` when `2*a > y/gcd`.

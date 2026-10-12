@@ -6,8 +6,6 @@ impl BoxedUint {
     ///
     /// For prime `rhs`, this corresponds to the Legendre symbol and
     /// indicates whether `self` is quadratic residue modulo `rhs`.
-    ///
-    /// This method executes in variable-time for both inputs.
     #[must_use]
     pub fn jacobi_symbol(&self, rhs: &Odd<BoxedUint>) -> JacobiSymbol {
         let rhs_bits = rhs.as_ref().bits_precision();
