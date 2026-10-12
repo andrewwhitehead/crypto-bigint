@@ -25,8 +25,8 @@ is *how* the batching is done:
 
 §4 sketches why the batched algorithm always finishes within its step budget,
 and §5 and §6 cover the Jacobi symbol and the variable-time variant. The full
-proof is in Appendix A, the bound on how far the high words drift in
-Appendix B, and notes on the alternatives that were tried in Appendix C.
+proof is in Appendix A, and the bound on how far the high words drift in
+Appendix B.
 
 Throughout, `W` is the machine word size (`Word::BITS`, 64 on most targets),
 `N` is the input bit width, `S` is the number of elementary steps folded into
@@ -103,6 +103,11 @@ The swap decision costs nothing extra either. The step subtracts `ah - bh`
 unconditionally and uses the borrow as the swap signal, the same trick
 `divstep` uses on the sign of its own counter.
 
+Two glued alternatives were implemented with the same step code and benchmarked
+against this form: a single-word register (31 steps per batch) and a two-word
+register (62 steps per batch). The split form was faster at every size above 2
+limbs, by roughly 10–30% in constant time and more in variable time.
+
 ## 2. The ambiguity band
 
 Running the high word for many steps without renormalizing it against the true
@@ -151,8 +156,8 @@ both word sizes.
 
 The batch length is one step below the longest the drift bound would certify.
 That step is the margin Pornin's parameters carry for free — his inner loop
-runs `k − 1` iterations against a `k + 1`-bit approximation — and Appendix C.2
-explains what it buys.
+runs `k − 1` iterations against a `k + 1`-bit approximation — and Case 2 of
+Appendix A.5 shows what it buys.
 
 The Jacobi path additionally uses the threshold at run time, as the halt test
 above; the GCD path uses it only through the batch length.
@@ -234,8 +239,8 @@ exceeds `E + S`.
 At the bottom, `E_lo ≤ E − W` puts the window's base a full word below the
 reference position, so an operand that fails to fill the window is known to lie
 well below `E`. The termination proof pays for a short window out of exactly
-that headroom (Appendix A.5, Case 1); Appendix C.1 explains why an offset of `S`
-would not be enough.
+that headroom (Appendix A.5, Case 1), and a smaller offset would not leave
+enough of it.
 
 Only once the tracked window has itself narrowed to `SMALL_THRESHOLD_LIMBS`
 (cheap to scan regardless) does the implementation drop the scheduled trip and
@@ -517,11 +522,12 @@ two of either.
 The partner is then zero, and no step of the batch can make it nonzero: a step
 replaces the larger operand and leaves the other untouched. The marker stays
 above the halt threshold for the whole batch: the last comparison sees
-`MAX >> (S − 1)`, which is at least `2^q` because `S = W − q − 1` (with two bits
-to spare; Appendix C.4). So no step is banded, the ordering the batch reads is
-fixed for its whole duration, and it agrees with the truth because a flagged
-operand exceeds `E` by more than `S`, so its true bit length still exceeds
-`E ≥ m` after all `S` halvings. ∎
+`MAX >> (S − 1)`, which is at least `2^q` because `S = W − q − 1`, with two bits
+to spare; raising `SPLIT_THRESHOLD_BITS` by more than two would need a shorter
+batch to keep this. So no step is banded, the ordering the batch reads is fixed
+for its whole duration, and it agrees with the truth because a flagged operand
+exceeds `E` by more than `S`, so its true bit length still exceeds `E ≥ m` after
+all `S` halvings. ∎
 
 The certainty here rests on the zero, not on any gap between magnitudes — one
 side stays exactly zero however far the marker has been halved. That is what
@@ -691,8 +697,10 @@ When the window is full, `j = W` and this is the case condition itself. When it
 is short, `j = κ = W + r − λ < W`, so `λ > r ≥ 0`, and the condition reads
 `λ + r + 1 ≥ 0`, which holds with room to spare. The shortfall `W − j` in what
 the banded step banks is paid from the headroom `2λ`, which is why the window
-base sits a full word below `E` (Appendix C.1). Nothing here needs the operands
-to fill the window: `κ ≤ 0`, where both lie below it, is included.
+base sits a full word below `E`: with the base only `o < W` bits below `E`, the
+condition would read `λ + r + 1 ≥ W − o`, which fails for small `r`. Nothing
+here needs the operands to fill the window: `κ ≤ 0`, where both lie below it, is
+included.
 
 **Case 2: `L ≥ E + 1`, i.e. `λ ≤ −1`.** The two cases cover every
 configuration, since `λ` is a multiple of `½`. Now `κ = W + r − λ > W`, so the
@@ -713,9 +721,11 @@ exactly `c ≥ β`.
 - **`c ≥ β`.** Then `ℓ ≤ m₀ + 1`, and (‡) gives `ΔΦ ≥ C(W) − 1 = S`. The extra
   bit is the straddle case: the two operands are close enough for drift to
   reverse them but sit either side of a power of two, so the survivor can be one
-  bit longer than the batch's starting minimum. One banded step still covers
-  the whole batch, with no appeal to `h`; this is what fixes `S` one below the
-  maximum (Appendix C.2).
+  bit longer than the batch's starting minimum. One banded step still covers the
+  whole batch, with no appeal to `h`. This is what fixes `S` one below the
+  longest batch the drift bound certifies: `h = 0` is admissible here (for
+  example `L = E + 1`, `m = E − 1`), and at `S = W − β + 1` this branch would
+  bank only `S − 1`.
 - **`c < β`.** The compact larger starts at `2^(W−1)` and each step replaces it
   by `⌊(ah − bh)/2⌋`, so writing `u = ah + bh` gives `u_{k+1} ≥ u_k/2 − 1` and
   hence `ah_k ≥ 2^(W−1−k) − bh − 2`. At the batch's last step,
@@ -817,18 +827,18 @@ one, while the tail is under `1/9` for every `S ≥ 2`. Hence
 `T(S) = ⌈(3S + 25)/9⌉`.
 
 Solving `S + bitlen(T(S)) ≤ W − 1` for the largest self-consistent `S` gives the
-batch length and threshold tabulated in §2 — `S = 58, T = 23` at `W = 64`, `S =
-27, T = 12` at `W = 32` — each landing on equality with the bound, as they must
-if `S` is maximal subject to it. The `− 1` is the deliberate step given up:
+batch length and threshold tabulated in §2 — `S = 58, T = 23` at `W = 64`,
+`S = 27, T = 12` at `W = 32` — each landing on equality with the bound, as they
+must if `S` is maximal subject to it. The `− 1` is the deliberate step given up:
 solving against `W` instead would give `S = 59` and `S = 28`, one longer, and
-C.2 explains what that step is worth.
+Case 2 of A.5 shows what that step is worth.
 
 The same inequality has a second reading, which is why one constant serves both
 purposes. Rearranged as `S ≤ W − bitlen(2^SPLIT_THRESHOLD_BITS + Δ)`, it says
 the batch is strictly shorter than what a single divergent step can pay for at a
 full window; A.5 uses it in that form to close the termination proof, and shows
-separately that a partial window pays for itself out of headroom. Solved as `S +
-bitlen(T) ≤ W`, it says the threshold and the batch length together fit the
+separately that a partial window pays for itself out of headroom. Solved as
+`S + bitlen(T) ≤ W`, it says the threshold and the batch length together fit the
 word, which is what makes the halt test sound. The two differ by exactly one
 step at both word sizes, and banking is the binding one: a batch length whose
 reduction a single divergence covers certifies its own comparisons with a bit in
@@ -892,178 +902,3 @@ with `q = SPLIT_THRESHOLD_BITS = bitlen(T)`. Reading off: `Δ < 2^q` at both
 sizes, with the tightest margin at `W = 64` (22.111 against 32); and
 `2^q + Δ ≤ 2^β` with `β` as tabulated, the tightest again at `W = 64` (54.111
 against 64). Both are exact rational facts about the two numerators above.
-
-## Appendix C. Design notes
-
-These notes record alternatives that look simpler or cheaper and where each one
-fails, so that a later edit does not quietly reintroduce them, together with
-side calculations behind the constants.
-
-### C.1 Why the extraction offset is `W` and not `S`
-
-The offset decides how a short window is paid for. In Case 1 of A.5 a short
-window holds `j = κ` significant bits, and with the window base `o` bits below
-`E` (plus the alignment `r`) that is `κ = o + r − λ`. The case condition
-`j − W + 1 + 2λ ≥ 0` then reads
-
-```
-    λ + r + 1  ≥  W − o
-```
-
-With `o = W` this always holds, since a short window has `λ > r ≥ 0`: every bit
-the window falls short by is a bit by which the larger operand sits below the
-schedule, and that headroom pays for it. At `o = S = W − β` the condition
-becomes `λ ≥ β − 1 − r`, while a short window only guarantees `λ > r − β`. For
-small `r` the gap between the two is non-empty at both word sizes, and it is
-reachable at any batch where `E − S` lands near a limb boundary. An earlier
-version of the code took the position after charging the batch, which put the
-base only about `S/2` below `E` and left the case further short still.
-
-### C.2 Why `S` is one below the maximum
-
-Case 2 of A.5, where the larger operand sits above the schedule, has to close on
-the banking bound alone: its close-operand branch makes no appeal to `h`, and
-`h = 0` is admissible there under (INV), for example with `L = E + 1` and
-`m = E − 1`. That branch banks `C(W) − 1`, one bit being lost to the straddle
-case. At `S = W − β + 1`, the longest batch the drift bound certifies, `C(W)`
-would equal `S` and the branch would fall a bit short. One step shorter,
-`C(W) = S + 1` covers it unconditionally.
-
-The cost is one step per batch, which the `⌈(2N − 1)/S⌉` batches' worth of
-budget mostly absorbs: unchanged at `N = 256` (9 batches) and `N = 512` (18),
-one batch more at 384, 1024 and 2048, three more at 4096.
-
-### C.3 Why not widen (INV) instead
-
-The tight configuration of C.2 scales with the slack, so `Φ ≤ 2E + ε` reproduces
-the same one-bit shortfall for every `ε`. The step has to come out of `S`.
-
-### C.4 The overflow marker and the halt threshold
-
-Theorem 1 (A.2) needs the overflow marker to stay above the halt threshold for
-the whole batch, which is why §2's halt test needs no extra case for it even
-though it measures only the gap. `MAX >> k` drops below the threshold
-`2^SPLIT_THRESHOLD_BITS` only once `k > W − SPLIT_THRESHOLD_BITS`, while the
-last comparison of a batch uses `k = S − 1`. The condition is therefore `S ≤ W −
-SPLIT_THRESHOLD_BITS + 1`, and `S = W − SPLIT_THRESHOLD_BITS − 1` clears it by
-two:
-
-```
-    W = 64:  MAX >> 57 = 127  vs threshold 32
-    W = 32:  MAX >> 26 =  63  vs threshold 16
-```
-
-The two bits are not spare capacity to be reclaimed. One is the step Appendix B
-gives up so that a divergence banks more than the batch owes; the other is the
-inequality's own margin. What the coupling still forbids is raising the
-threshold constant by more than two without shortening the batch in step — which
-Appendix B's admissible range would otherwise permit — since that would let the
-marker fall inside the band before the batch ends, and the batch would truncate
-on a comparison that was never uncertain.
-
-### C.5 What the shared constant costs the GCD path
-
-The `2^SPLIT_THRESHOLD_BITS` term in B.1's inequality is the halt threshold, and
-only the Jacobi path has one. Without a halt, a wrong comparison is far more
-constrained. In the orientation where the compact says `ah ≥ bh` while `A < B`,
-`(A − B)/2^σ = (ah − bh) − D < 0` forces `D > ah − bh ≥ 0`; in the mirror
-orientation the same algebra gives `D ≤ ah − bh < 0`. Either way the compact
-separation and the error have opposite effects rather than adding, and `|A −
-B|/2^σ = |D| − |ah − bh| ≤ Δ`. A GCD-only build could therefore take `β =
-bitlen(Δ)` — 5 at `W = 64`, 4 at `W = 32` — and run `S = 59` and `S = 28`, one
-step longer, with neither arm of the inequality above applying. Unifying the two
-paths costs the GCD path exactly that one step; it is not split, because two
-batch lengths would mean two of every constant.
-
-The shift form of the test in §2 makes the effective threshold
-`2^SPLIT_THRESHOLD_BITS − 1`, i.e. 31 and 15 against admissible ranges
-`[23, 105]` and `[12, 52]`. The rounding costs no margin, and the room it
-leaves above `T` is what absorbed the move to the signed read.
-
-### C.6 How the initial error interval feeds the drift
-
-B.1's constant includes the complement read of §3: with an exact truncation the
-bound would be `S/3 + 10/9` instead of `S/3 + 25/9`. The difference is `5/3`
-rather than one ulp, for the reason below. Reading negative operands by
-complement nevertheless costs nothing at either word size, because the
-power-of-two rounding of the threshold already had room for it.
-
-The linear growth is structural rather than incidental. The step map's
-characteristic roots are `1/2` and `−1`, and the `−1` eigenvector is `D`
-itself, so the half-ulp injected by each shift-out lands on a neutral mode and
-resonates instead of damping. The extremal trajectory is a run of swap-subtract
-steps with the dropped bit alternating; the slope `1/3` is `(2/3) × (1/2)` —
-half the injections surviving the sign flip, projected onto `D`. Only the
-constant depends on the initial interval, and hence on the extraction: `10/9`
-from an exact truncation, `25/9` from the complement read this engine uses.
-
-**A larger initial interval would compound, not add.** Anything that widens the
-starting interval is amplified by the same dynamics that amplify the injected
-error, so for an interval of `p` ulps the band is neither `p + Δ(S)` nor
-`p·Δ(S)`:
-
-| `p` | 1 | 2 | 4 | 8 |
-|---|---|---|---|---|
-| band at `S = 27` | 10.11 | 11.78 | 15.44 | 23.11 |
-| band at `S = 58` | 20.44 | 22.11 | 25.78 | 33.44 |
-
-(`p = 1` is the exact-truncation figure `S/3 + 10/9`; B.1's `Δ(S)` is the
-`p = 2` entry.)
-
-The operative column is `p = 2`, the complement read of §3. What the table shows
-is how little margin is left beyond it: a window the operands don't fill,
-normalized without a cap on the shift, would cost `p = 2^k` for a shortfall of
-`k` bits, and at `W = 32` a one-bit shortfall on top of the signed read — `p =
-4`, band 15.44 against an effective threshold of 15 — is already the end of it.
-The scheduled extraction guards against exactly that by capping its normalizing
-shift at `min(clz(a_trip | b_trip), 2W)`, which holds `σ` at or above the window
-base so that no bits below the base are fabricated. The window may then be
-short, but short is not the same as amplified: `κ < W` costs banking, which A.5
-pays for out of headroom, and costs no drift at all.
-
-### C.7 Relation to Pornin's proof
-
-Four points of contact, one of which does not transfer.
-
-*The margin.* His inner loop runs `k − 1` steps against a `k + 1`-bit
-approximation whose error, being glued, does not accumulate, so his banking
-bound exceeds his batch length by a bit. That margin is incidental there — his
-batch length is capped by the `k − 1` exact low bits, not by banking — and
-deliberate here, because the split form's purpose is to push `S` up until
-banking is what binds. `S = W − q − 1` restores his margin at the point his
-argument uses it.
-
-*The case split.* Pornin's proof (Appendix A.3 of his paper) does not ask
-whether the operands share a bit length at a divergence; it splits on how far
-they have already shrunk. Case 2's two branches are the same move.
-
-*The barrier.* The barrier at the end of A.5 is the bound in Pornin's Appendix
-A.3 with one substitution: his level comes from the glued form's error bound
-`2^{n−k−1}`, ours from `Δ`, and the barrier moves with the constant. He reaches
-it by sign persistence — in the glued form a divergence leaves the operands with
-opposite signs, that state persists because halving preserves a sign and
-subtracting a negative from a positive leaves a positive, and the barrier
-follows. Under (MAG) this engine never enters that state, so the route is both
-unavailable and unnecessary: the compact words are independent registers and
-their monotonicity gives the barrier directly. The conclusions agree; the routes
-do not.
-
-*The hidden iteration.* He reads the closing conditional negation as `S + 1`
-iterations' worth of work for an `S`-bit guarantee. That iteration is consumed
-by the guarantee rather than added to it — `Φ` is on magnitudes, and
-`a = |a|; b = |b|` changes signs and no bit lengths — which is why the budget
-divides `2N − 1` by `S` and not `S + 1`. The first version of his note made the
-more aggressive claim; its errata records the counterexample.
-
-### C.8 The glued form, measured
-
-Two glued variants were implemented and benchmarked against the split form: a
-single-word register with 31 exact low bits and a 33-bit high part (31 steps per
-batch), and a two-word register with a 64-bit low word and a 64-bit high word
-(62 steps per batch), the latter used above `SMALL_THRESHOLD_LIMBS`. Both still
-need the halt test for the Jacobi symbol. With all variants using the same
-decision-mask step code, the split form was faster at every size above 2 limbs,
-by roughly 10–30% in constant time and more in variable time. The glued forms'
-advantage is a simpler drift analysis: the register's error does not grow,
-because every halving of the register is exact, so the halt threshold is a fixed
-number of bits and needs no enumeration.
