@@ -1,10 +1,7 @@
 use super::{
     CofactorPair, ExtendedIntRef, SMALL_THRESHOLD_LIMBS, SPLIT_BATCH_SIZE, WORD_BATCH_SIZE, bingcd,
 };
-use crate::{
-    Choice, Limb, Uint, UintRef, Word, modular::gcd::bingcd::BingcdMatrix, primitives::u32_min,
-    word,
-};
+use crate::{Choice, Limb, UintRef, Word, modular::gcd::bingcd::BingcdMatrix, word};
 
 /// The running state of a binary GCD reduction.
 #[derive(Debug)]
@@ -412,42 +409,46 @@ const fn gcd_reduce_small<const JACOBI: bool>(
 #[allow(clippy::cast_possible_truncation)]
 const fn extract_compact_pair(a: &UintRef, b: &UintRef) -> ((Word, Word), (Word, Word), Choice) {
     debug_assert!(a.nlimbs() == b.nlimbs(), "mismatched sizes");
-    let mut lo_pair = 0;
-    let (mut top_lo_pair, mut top_hi_pair) = (0, 0);
+
+    // The latch is driven by a full-width mask rather than a `Choice`: every conversion of a
+    // `Choice` to a mask is an optimization barrier, and this runs once per limb.
+    let (mut a_prev, mut b_prev) = (0, 0);
+    let (mut a_lo, mut a_hi, mut b_lo, mut b_hi) = (0, 0, 0, 0);
     let mut top_index = 0;
 
     let mut i = 0;
     while i < a.nlimbs() {
-        let (a_i, b_i) = (a.limbs[i], b.limbs[i]);
-        let hi_pair = word::join(a_i.0, b_i.0);
-        let nz = a_i.bitor(b_i).is_nonzero();
-        top_lo_pair = word::select_wide(top_lo_pair, lo_pair, nz);
-        top_hi_pair = word::select_wide(top_hi_pair, hi_pair, nz);
-        top_index = nz.select_u32(top_index, i as u32);
+        let (a_i, b_i) = (a.limbs[i].0, b.limbs[i].0);
+        let nz = nonzero_mask(a_i | b_i);
+        a_lo ^= nz & (a_lo ^ a_prev);
+        a_hi ^= nz & (a_hi ^ a_i);
+        b_lo ^= nz & (b_lo ^ b_prev);
+        b_hi ^= nz & (b_hi ^ b_i);
+        top_index ^= nz as u32 & (top_index ^ i as u32);
 
-        lo_pair = hi_pair;
+        (a_prev, b_prev) = (a_i, b_i);
         i += 1;
     }
 
-    let (a_top, b_top, shift) =
-        top_window_words(word::split_wide(top_lo_pair), word::split_wide(top_hi_pair));
-    let exact = Choice::from_u32_nz(top_index | shift).not();
+    let (a_top, b_top) = top_window_words((a_lo, b_lo), (a_hi, b_hi));
+    // When the operands fit the top limb the window holds `a * 2^lz` and `b * 2^lz` with nothing
+    // dropped, and every step keeps it that way: an even `a` halves exactly, and a subtract step
+    // leaves `a - b` even (both odd). So the window compares exactly for the whole batch.
+    let exact = Choice::from_u32_nz(top_index).not();
     ((a.limbs[0].0, a_top), (b.limbs[0].0, b_top), exact)
 }
 
-/// Assembles `(a_word, b_word, shift)` out of the latched `(previous, current)` `Word` pairs
-/// (`a` in the low half, `b` in the high half) as produced by a single low-to-high scan
-/// over `a`/`b`. Trims leading zeros from the wide word values and returns the high
-/// word along with the shift value.
+/// Assembles `(a_word, b_word)` out of the latched `(previous, current)` words of `a` and `b`
+/// (each pair given as `(a, b)`) as produced by a single low-to-high scan over `a`/`b`: trims the
+/// shared leading zeros of the current words, filling from the previous words.
 #[inline(always)]
 #[allow(clippy::cast_possible_truncation)]
-const fn top_window_words(lo: (Word, Word), hi: (Word, Word)) -> (Word, Word, u32) {
+const fn top_window_words(lo: (Word, Word), hi: (Word, Word)) -> (Word, Word) {
+    // `hi_lz <= W`, and the wide shift reads the previous word in full when `hi_lz = W`.
     let hi_lz = (hi.0 | hi.1).leading_zeros();
-    let shift = Word::BITS - hi_lz;
     (
-        Limb(lo.0).unbounded_shr(shift).0 | (hi.0 << hi_lz),
-        Limb(lo.1).unbounded_shr(shift).0 | (hi.1 << hi_lz),
-        shift,
+        ((word::join(lo.0, hi.0) << hi_lz) >> Word::BITS) as Word,
+        ((word::join(lo.1, hi.1) << hi_lz) >> Word::BITS) as Word,
     )
 }
 
@@ -484,6 +485,7 @@ const fn top_window_words(lo: (Word, Word), hi: (Word, Word)) -> (Word, Word, u3
 /// step, so at the batch's last comparison it is still at least
 /// `MAX >> (S - 1) = 2^(q+2) - 1`, above the halt threshold `2^q`.
 #[inline(always)]
+#[allow(clippy::cast_possible_truncation)]
 pub const fn scheduled_extract_compact_pair(
     a: &ExtendedIntRef<'_>,
     b: &ExtendedIntRef<'_>,
@@ -491,56 +493,263 @@ pub const fn scheduled_extract_compact_pair(
 ) -> ((Word, Word), (Word, Word), u32) {
     let extract_limb = (n >> Limb::LOG2_BITS) as usize;
 
-    let (a_neg, b_neg) = (a.is_negative(), b.is_negative());
+    // All decisions are carried as full-width masks rather than `Choice` values: every conversion
+    // of a `Choice` to a mask is an optimization barrier.
+    let (a_neg, b_neg) = (msb_mask(a.hi.0), msb_mask(b.hi.0));
     let (a_trip, a_over) = trip_and_overflow(a.lo.trailing(extract_limb), a_neg);
     let (b_trip, b_over) = trip_and_overflow(b.lo.trailing(extract_limb), b_neg);
-
-    let lz = u32_min(a_trip.bitor(&b_trip).leading_zeros(), Limb::BITS * 2);
-
-    let (a_top, b_top) = (a_trip.shl(lz).limbs[2].0, b_trip.shl(lz).limbs[2].0);
     debug_assert!(
-        !a_over.and(b_over).to_bool(),
+        a_over & b_over == 0,
         "invalid extraction position, m <= E violation"
     );
+
+    // `lz = min(clz(a_trip | b_trip), 2W)`: a zero word has `W` leading zeros, so adding the
+    // middle word's count only when the top word is zero reaches exactly `2W` once both are.
+    let (top, mid) = (a_trip[2] | b_trip[2], a_trip[1] | b_trip[1]);
+    let lz = top.leading_zeros() + (!nonzero_mask(top) as u32 & mid.leading_zeros());
+    let (a_top, b_top) = (shifted_top_word(a_trip, lz), shifted_top_word(b_trip, lz));
+
+    let any_over = a_over | b_over;
     let (a0, b0) = (a.lo.limbs[0].0, b.lo.limbs[0].0);
-    let any_over = a_over.or(b_over);
     (
         (
-            word::select(a0, a0.wrapping_neg(), a_neg),
-            word::select(a_top, word::choice_to_mask(a_over), any_over),
+            (a0 ^ a_neg).wrapping_sub(a_neg),
+            a_top ^ (any_over & (a_top ^ a_over)),
         ),
         (
-            word::select(b0, b0.wrapping_neg(), b_neg),
-            word::select(b_top, word::choice_to_mask(b_over), any_over),
+            (b0 ^ b_neg).wrapping_sub(b_neg),
+            b_top ^ (any_over & (b_top ^ b_over)),
         ),
-        any_over.select_u32(Limb::BITS * 2 - lz, Limb::BITS * 2),
+        Limb::BITS * 2 - (lz & !(any_over as u32)),
     )
 }
 
 /// The per-operand half of [`scheduled_extract_compact_pair`], called once for each
-/// of `a`, `b`: extract a 3-word non-negative window from the start of `x`, as well as a flag
-/// indicating whether the absolute value of the upper words is non-zero.
+/// of `a`, `b`: extract a 3-word non-negative window from the start of `x` (one's complemented
+/// when `neg` is set, and padded with zeros past the end of `x`), as well as a mask that is set
+/// when the magnitude has significant bits above the window.
 #[inline(always)]
-const fn trip_and_overflow(x: &UintRef, neg: Choice) -> (Uint<3>, Choice) {
-    let neg_mask = Limb::choice_to_mask(neg);
-
-    // Extract 3 words from the beginning of `x`, padding with the sign word if necessary.
-    let mut trip_raw = Uint::<3>::from_words([neg_mask.0; 3]);
-    let len = if x.nlimbs() > 3 { 3 } else { x.nlimbs() };
-    trip_raw
-        .as_mut_uint_ref()
-        .leading_mut(len)
-        .copy_from(x.leading(len));
-    // Swap for the one's complement `trip_raw.not()` if negative.
-    let trip = trip_raw.bitxor_limb(neg_mask);
-
-    // Reduce the limbs above `len` determining whether they are all sign bits.
-    let mut over_acc = Limb::ZERO;
-    let mut i = len;
+const fn trip_and_overflow(x: &UintRef, neg: Word) -> ([Word; 3], Word) {
+    let mut trip = [0; 3];
+    let mut over = 0;
+    let mut i = 0;
     while i < x.nlimbs() {
-        over_acc = over_acc.bitor(x.limbs[i].bitxor(neg_mask));
+        let w = x.limbs[i].0 ^ neg;
+        if i < 3 {
+            trip[i] = w;
+        } else {
+            over |= w;
+        }
         i += 1;
     }
-    let over = over_acc.is_nonzero();
-    (trip, over)
+    (trip, nonzero_mask(over))
+}
+
+/// The top word of the 3-word value `t` shifted left by `lz <= 2W`: below `W` it straddles the top
+/// two words, from `W` up it straddles the lower two.
+#[inline(always)]
+#[allow(clippy::cast_possible_truncation)]
+const fn shifted_top_word(t: [Word; 3], lz: u32) -> Word {
+    // `lz >= W` exactly when `W - 1 - lz` borrows, setting the top bit of the `u32` difference.
+    let ge = (((Limb::BITS - 1).wrapping_sub(lz) >> (u32::BITS - 1)) as Word).wrapping_neg();
+    let hi = t[2] ^ (ge & (t[2] ^ t[1]));
+    let lo = t[1] ^ (ge & (t[1] ^ t[0]));
+    let s = lz - (Limb::BITS & ge as u32);
+    ((word::join(lo, hi) << s) >> Word::BITS) as Word
+}
+
+/// `Word::MAX` if the top bit of `x` is set, zero otherwise.
+#[inline(always)]
+const fn msb_mask(x: Word) -> Word {
+    (x >> (Word::BITS - 1)).wrapping_neg()
+}
+
+/// `Word::MAX` if `x` is nonzero, zero otherwise.
+#[inline(always)]
+const fn nonzero_mask(x: Word) -> Word {
+    msb_mask(x | x.wrapping_neg())
+}
+
+#[cfg(all(test, feature = "rand_core"))]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::integer_division_remainder_used,
+    reason = "test"
+)]
+mod tests {
+    use super::{ExtendedIntRef, extract_compact_pair, scheduled_extract_compact_pair};
+    use crate::{Limb, Random, Uint, UintRef, Word};
+    use chacha20::ChaCha8Rng;
+    use rand_core::{Rng, SeedableRng};
+
+    /// The straightforward `Uint<3>` formulation of [`scheduled_extract_compact_pair`].
+    fn reference(
+        a: (&[Limb], Limb),
+        b: (&[Limb], Limb),
+        n: u32,
+    ) -> ((Word, Word), (Word, Word), u32) {
+        let extract_limb = (n / Limb::BITS) as usize;
+        let trip = |x: &[Limb], hi: Limb| {
+            let neg = if hi.0 >> (Word::BITS - 1) == 1 {
+                Word::MAX
+            } else {
+                0
+            };
+            let x = &x[extract_limb..];
+            let mut words = [neg; 3];
+            for (w, l) in words.iter_mut().zip(x) {
+                *w = l.0;
+            }
+            let over = x.iter().skip(3).any(|l| l.0 ^ neg != 0);
+            (Uint::<3>::from_words(words.map(|w| w ^ neg)), over, neg)
+        };
+        let ((a_trip, a_over, a_neg), (b_trip, b_over, b_neg)) = (trip(a.0, a.1), trip(b.0, b.1));
+        let lz = a_trip.bitor(&b_trip).leading_zeros().min(2 * Limb::BITS);
+        let any_over = a_over || b_over;
+        let top = |t: Uint<3>, over: bool| {
+            if any_over {
+                if over { Word::MAX } else { 0 }
+            } else {
+                t.shl(lz).limbs[2].0
+            }
+        };
+        let low = |x: &[Limb], neg: Word| {
+            if neg != 0 {
+                x[0].0.wrapping_neg()
+            } else {
+                x[0].0
+            }
+        };
+        (
+            (low(a.0, a_neg), top(a_trip, a_over)),
+            (low(b.0, b_neg), top(b_trip, b_over)),
+            if any_over {
+                2 * Limb::BITS
+            } else {
+                2 * Limb::BITS - lz
+            },
+        )
+    }
+
+    /// Random non-negative value of `len` limbs (in a fixed buffer) with a random bit length.
+    fn magnitude(rng: &mut ChaCha8Rng, len: usize) -> [Limb; 12] {
+        let bits = rng.next_u32() % (len as u32 * Limb::BITS + 1);
+        let mut limbs = [Limb::ZERO; 12];
+        for (i, limb) in limbs.iter_mut().enumerate().take(len) {
+            let word = Uint::<1>::random_from_rng(rng).limbs[0].0;
+            let keep = bits.saturating_sub(i as u32 * Limb::BITS).min(Limb::BITS);
+            *limb = Limb(if keep == 0 {
+                0
+            } else {
+                word >> (Limb::BITS - keep)
+            });
+        }
+        limbs
+    }
+
+    /// Random signed operand of `len` limbs: a [`magnitude`], stored one's complemented with an
+    /// all-ones `hi` when negative.
+    fn operand(rng: &mut ChaCha8Rng, len: usize) -> ([Limb; 12], Limb) {
+        let mut limbs = magnitude(rng, len);
+        if rng.next_u32() & 1 == 1 {
+            for limb in limbs.iter_mut().take(len) {
+                *limb = limb.not();
+            }
+            (limbs, Limb::MAX)
+        } else {
+            (limbs, Limb::ZERO)
+        }
+    }
+
+    #[test]
+    fn scheduled_extract_matches_reference() {
+        let mut rng = ChaCha8Rng::seed_from_u64(3);
+        let (mut below_w, mut above_w, mut capped, mut over, mut neg) = (0, 0, 0, 0, 0);
+        for _ in 0..50_000 {
+            let len = 4 + (rng.next_u32() % 9) as usize;
+            let (a_lo, a_hi) = operand(&mut rng, len);
+            let (b_lo, b_hi) = operand(&mut rng, len);
+            let n = rng.next_u32() % (len as u32 * Limb::BITS);
+
+            let expected = reference((&a_lo[..len], a_hi), (&b_lo[..len], b_hi), n);
+            let (a_over, b_over) = (expected.0.1 == Word::MAX, expected.1.1 == Word::MAX);
+            if a_over && b_over {
+                // Excluded by the schedule's invariant (and by a debug assertion).
+                continue;
+            }
+
+            let (mut a_buf, mut b_buf) = (a_lo, b_lo);
+            let a = ExtendedIntRef::new(UintRef::new_mut(&mut a_buf[..len]), a_hi);
+            let b = ExtendedIntRef::new(UintRef::new_mut(&mut b_buf[..len]), b_hi);
+            let actual = scheduled_extract_compact_pair(&a, &b, n);
+            assert_eq!(
+                actual,
+                expected,
+                "len={len} n={n} a={:?}/{a_hi:?} b={:?}/{b_hi:?}",
+                &a_lo[..len],
+                &b_lo[..len]
+            );
+
+            let lz = 2 * Limb::BITS - expected.2;
+            match () {
+                _ if expected.2 == 2 * Limb::BITS && (a_over || b_over) => over += 1,
+                _ if lz == 2 * Limb::BITS => capped += 1,
+                _ if lz >= Limb::BITS => above_w += 1,
+                _ => below_w += 1,
+            }
+            neg += usize::from(a_hi == Limb::MAX || b_hi == Limb::MAX);
+        }
+        for (case, count) in [
+            ("lz < W", below_w),
+            ("W <= lz < 2W", above_w),
+            ("lz = 2W", capped),
+            ("overflow", over),
+            ("negative", neg),
+        ] {
+            assert!(count > 1_000, "only {count} cases with {case}");
+        }
+    }
+
+    #[test]
+    fn extract_matches_reference() {
+        let mut rng = ChaCha8Rng::seed_from_u64(5);
+        let (mut single, mut multi) = (0, 0);
+        for _ in 0..50_000 {
+            let len = 1 + (rng.next_u32() % 8) as usize;
+            let (a, mut b) = (magnitude(&mut rng, len), magnitude(&mut rng, len));
+            b[0].0 |= 1;
+
+            // Reference: the top nonzero limb of `a | b` and the one below it.
+            let t = (0..len)
+                .rev()
+                .find(|&i| (a[i].0 | b[i].0) != 0)
+                .unwrap_or(0);
+            let prev = |x: &[Limb; 12]| if t == 0 { 0 } else { x[t - 1].0 };
+            let lz = (a[t].0 | b[t].0).leading_zeros();
+            let top = |x: &[Limb; 12]| {
+                (((u128::from(x[t].0) << Word::BITS | u128::from(prev(x))) << lz) >> Word::BITS)
+                    as Word
+            };
+            let expected = ((a[0].0, top(&a)), (b[0].0, top(&b)), t == 0);
+
+            let ((a0, a_top), (b0, b_top), is_exact) =
+                extract_compact_pair(UintRef::new(&a[..len]), UintRef::new(&b[..len]));
+            assert_eq!(
+                ((a0, a_top), (b0, b_top), is_exact.to_bool()),
+                expected,
+                "len={len} a={:?} b={:?}",
+                &a[..len],
+                &b[..len]
+            );
+
+            if t == 0 {
+                single += 1;
+            } else {
+                multi += 1;
+            }
+        }
+        for (case, count) in [("single limb", single), ("multi limb", multi)] {
+            assert!(count > 1_000, "only {count} {case} cases");
+        }
+    }
 }
