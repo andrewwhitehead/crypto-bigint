@@ -16,8 +16,8 @@ is *how* the batching is done:
 - **§1:** each operand is approximated by two independent words, an exact low
   word and an approximate high word, instead of one packed register. This allows
   longer batches.
-- **§2:** the Jacobi symbol path stops a batch at the first comparison it cannot
-  certify.
+- **§2:** the Jacobi symbol path stops a batch right after the first comparison
+  it cannot certify.
 - **§3:** the per-round work that scales with the operand width is cut down. The
   tracked window shrinks, the high words are read at a scheduled position
   instead of found by a scan, and sign correction is folded into the matrix
@@ -57,9 +57,9 @@ contiguously, into one value:
 ā = (a mod 2^(k−1)) + 2^(k−1)·⌊a / 2^(n−k−1)⌋
 ```
 
-and `b̄` likewise, where `n = max(len(a), len(b))`. The inner loop then runs its
-subtract-and-halve steps on `ā`/`b̄` as ordinary single-word integers: a borrow
-out of the low `k − 1` bits is *meant* to ripple up into the high
+and `b̄` likewise, where `n = max(bitlen a, bitlen b)`. The inner loop then runs
+its subtract-and-halve steps on `ā`/`b̄` as ordinary single-word integers: a
+borrow out of the low `k − 1` bits is *meant* to ripple up into the high
 approximation, because together they represent one packed number.
 
 The cost is that the two halves share one register's worth of bits. Growing the
@@ -74,6 +74,24 @@ words, each with its own full register width**:
   parity decision every step
 - a **high word** (`ah`/`bh`) — a comparison value derived from the top of the
   operand, driving the swap decision every step
+
+Side by side, for one operand:
+
+```
+  Pornin's glued form: one 2k-bit register per operand
+
+    ┌──────── k + 1 bits ─────────┬──────── k − 1 bits ─────────┐
+    │ top of a (approximate)      │ low bits of a (exact)       │  ā
+    └─────────────────────────────┴─────────────────────────────┘
+         a borrow out of the low part reaches the high part
+
+  Split form: two independent W-bit words per operand
+
+    ┌────────── W bits ───────────┐  ┌────────── W bits ───────────┐
+    │ ah: top of a (approximate)  │  │ al: low bits of a (exact)   │
+    └─────────────────────────────┘  └─────────────────────────────┘
+       drives the swap decision        drives the parity decision
+```
 
 Together these are the operand's **compact form**, and the high words are the
 "compact words" the batch compares. See `partial_xgcd` in `bingcd.rs`: the high
@@ -106,7 +124,13 @@ unconditionally and uses the borrow as the swap signal, the same trick
 Two glued alternatives were implemented with the same step code and benchmarked
 against this form: a single-word register (31 steps per batch) and a two-word
 register (62 steps per batch). The split form was faster at every size above 2
-limbs, by roughly 10–30% in constant time and more in variable time.
+limbs, by roughly 10–30% in constant time and more in variable time. Against the
+single-word register the difference is mostly the number of matrix applications:
+each batch ends in a full-width update of both operands, and 58 steps per batch
+instead of 31 needs close to half as many of them for the same step budget. The
+two-word register runs slightly longer batches, so its cost is in the steps
+themselves, which work on double-word values instead of two independent single
+words.
 
 ## 2. The ambiguity band
 
@@ -122,14 +146,33 @@ wrong swap silently flips the accumulated quadratic-reciprocity sign, and
 nothing downstream can distinguish a legitimate flip from a spurious one. Every
 step the Jacobi path executes has to be certifiably correct.
 
-So the Jacobi variant doesn't push through a batch unconditionally. It tracks
-an **ambiguity band** — the width of the interval within which a comparison
-cannot be trusted — and halts the batch the moment a comparison falls inside
-it, rather than repairing after the fact. In the code this is the `HALTING`
-branch of `partial_xgcd`: after each subtract step it tests whether the high
-words' difference has fallen below `2^SPLIT_THRESHOLD_BITS`. Once it has,
-`unhalted` goes false, and every following step in the batch becomes a no-op
-rather than risk a step whose direction can't be certified.
+So the Jacobi variant doesn't push through a batch unconditionally. It tracks an
+**ambiguity band** — the width of the interval within which a comparison cannot
+be trusted — and halts the batch right after the first comparison that falls
+inside it, rather than repairing after the fact. In the code this is the
+`HALTING` branch of `partial_xgcd`: after each subtract step it tests whether
+the high words' difference has fallen below `2^SPLIT_THRESHOLD_BITS`. Once it
+has, `unhalted` goes false, and every following step in the batch becomes a
+no-op rather than risk a step whose direction can't be certified.
+
+The drift bound `T` and the halt threshold divide the compact words' separation
+at a subtract step into three ranges:
+
+```
+  0                       T                     2^SPLIT_THRESHOLD_BITS
+  ├───────────────────────┼─────────────────────────┼─────────────────────────►
+    a wrong comparison      correct, but              not banded
+    is possible             still banded
+
+  └──────────────────── banded ─────────────────────┘
+          |ah − bh| at a subtract step, in units of the compact word
+```
+
+A wrong comparison needs the compact words to be within `T` of each other, and
+`T` is below the threshold, so every step before the first banded one has a
+correct comparison. The halt test gives up a little: it also stops at
+separations between `T` and the threshold, where the comparison is correct but
+the test cannot tell.
 
 Two exceptions widen that test, both covering cases where nothing needs
 certifying. One is the `exact` flag, set when the extraction has returned the
@@ -172,12 +215,12 @@ them, making it competitive at up to hundreds of limbs.
 ### The tracked window
 
 `GcdPair::len` in `pair.rs` is a limb-granularity bound: nothing at or above
-that limb index is read or written during the round, in either loop
-(`a.leading_mut(len)` and `b.leading_mut(len)` clip every
+that limb index is read or written during the round, by either the extraction or
+the matrix application (`a.leading_mut(len)` and `b.leading_mut(len)` clip every
 operand access to it). It steps down one whole limb at a time, whenever the
-consumed step count crosses a precomputed threshold (`window_shrink_at`),
-which bounds a round's memory footprint and access pattern to less than the
-full `N` bits.
+consumed step count crosses a precomputed threshold (`window_shrink_at`), which
+bounds a round's memory footprint and access pattern to less than the full `N`
+bits.
 
 It doesn't engage immediately. The first threshold isn't crossed until the
 remaining budget `k_remain` has fallen to roughly `N`, and since the total
@@ -189,23 +232,23 @@ the schedule depends only on public quantities.
 
 ### The extraction window
 
-This is the position of the high-word values fed into the transition matrix.
-Pornin computes it by scanning both inputs for their aligned top words. The
+The extraction window is where each batch reads the operands' high words from.
+Pornin locates it by scanning both inputs for their aligned top words. The
 standard constant-time way to do that is to walk every limb from the top once
 per round, maintaining a "have we passed the true top yet" flag: one zero-check
 and two conditional swaps per limb, every round (see `extract_compact_pair` in
 `pair.rs`). At small sizes the overhead is minor; at larger `N` it is not.
 
-For tracked window sizes above `SMALL_THRESHOLD_LIMBS`, this implementation
-reads a fixed-size **3-limb trip** instead, via `scheduled_extract_compact_pair`,
-at a position derived from the step budget. What is tracked is the *bottom* of
-the extraction, `extract_pos = E − W`, where `E = (k_remain + 1)/2` is read off
-the remaining budget before each batch is charged. The budget falls by `S` per
-batch, so `E` falls by `S/2`: `E_i = N − (S/2)·i` after `i` batches, the
-reference position that §4 reasons about. Where `S` is odd, `E` can land on a
-half-bit, and the code rounds it down, which only lowers the base. No scan is
-involved: every limb index the trip touches is public and schedule-derived
-rather than data-derived.
+In Stage 1, while the tracked window is wider than `SMALL_THRESHOLD_LIMBS`, this
+implementation reads a fixed-size **3-limb trip** instead, via
+`scheduled_extract_compact_pair`, at a position derived from the step budget.
+What is tracked is the *bottom* of the extraction, `extract_pos = E − W`, where
+`E = (k_remain + 1)/2` is read off the remaining budget before each batch is
+charged. The budget falls by `S` per batch, so `E` starts at `N` and falls by
+`S/2` per batch; it is the reference position that §4 reasons about. Where `S`
+is odd, `E` can land on a half-bit, and the code rounds it down, which only
+lowers the base. No scan is involved: every limb index the trip touches is
+public and schedule-derived rather than data-derived.
 
 Within the trip the position is effectively data-chosen, even though the trip
 itself is not. The shared normalizing shift is taken from the larger of the
@@ -224,23 +267,42 @@ between two magnitudes. Appendix A.2 proves the substitution sound.
 
 Handing over `E − W` rather than `E` is what makes the trip wide enough at both
 ends, and the offset is `W` rather than `S` for a reason the termination proof
-needs. Write the limb alignment as `E_lo = E − W − r`, `r ∈ [0, W)`, which
-includes any half-bit the rounding of `E` drops. The trip spans `3W` bits from
-there, so its top sits at `E + 2W − r`, clearing `E + S` by
+needs. The trip starts at the limb boundary at or below `E − W`, so its base `P`
+satisfies `E − 2W < P ≤ E − W`, including when the rounding of a half-bit `E`
+lowers it. The trip spans `3W` bits from there, so its top sits above `E + W`
+and clears `E + S` by more than `W − S`: at least 7 bits at `W = 64` and 5½ at
+`W = 32`. That margin is what Theorem 1 needs: an operand can overflow the trip
+only if it exceeds `E + S`.
 
-```
-    2W − r − S  >  W − S
-```
-
-— at least 7 bits at `W = 64` and 5½ at `W = 32`, worst at the largest `r`. That
-margin is what Theorem 1 needs: an operand can overflow the trip only if it
-exceeds `E + S`.
-
-At the bottom, `E_lo ≤ E − W` puts the window's base a full word below the
+At the bottom, `P ≤ E − W` puts the window's base a full word below the
 reference position, so an operand that fails to fill the window is known to lie
 well below `E`. The termination proof pays for a short window out of exactly
-that headroom (Appendix A.5, Case 1), and a smaller offset would not leave
+that distance (Appendix A.5, Case 1), and a smaller offset would not leave
 enough of it.
+
+The geometry, with high bit positions on the left. `L` is the larger operand's
+bit length, and `P` is `E − W` rounded down to a limb boundary:
+
+```
+     P+3W          E+S            E                   P                       0
+      ├─────────────┼─────────────┼───────────────────┤ ···     ├─────────────┤
+      └───────── trip: 3W bits read from P ───────────┘          low word
+
+  full window
+                           L
+                           ├── high word ──┤
+                                           └ σ = L − W
+
+  short window
+                                            L
+                                      ├00000┼ j bits──┤
+                                                      └ σ = P
+```
+
+When the larger operand reaches at least `W` bits above the base, the high word
+is its top `W` bits: a full window. Otherwise the high word stops at the base
+and holds only `j = L − P` significant bits of it under `W − j` leading zeros: a
+short window. Appendix A works in these same quantities.
 
 Only once the tracked window has itself narrowed to `SMALL_THRESHOLD_LIMBS`
 (cheap to scan regardless) does the implementation drop the scheduled trip and
@@ -249,12 +311,12 @@ switch to Stage 2's exact, data-derived extraction.
 ### Deferred sign correction
 
 Forcing both operands back to positive each round is another full-width pass.
-Instead, the operand is tracked through an
-`ExtendedIntRef`: an ordinary `UintRef` plus
-one extra sign/overflow limb, genuinely negative in two's complement across
-rounds, and collapsed to a true magnitude only where something downstream needs
-one — the switch to Stage 2, or the final result. The correction folds into
-work already being done rather than adding a pass of its own.
+Instead, each operand is tracked through an `ExtendedIntRef`: an ordinary
+`UintRef` plus one extra sign/overflow limb, genuinely negative in two's
+complement across rounds, and collapsed to a true magnitude only where something
+downstream needs one — the switch to Stage 2, or the final result. The
+correction folds into work already being done rather than adding a pass of its
+own.
 
 While Stage 1 runs, a negative operand's window is read by complementing the
 extracted words in place rather than negating the wide value: the high word
@@ -270,14 +332,14 @@ the deferred signs into the matrix's columns, one conditional negation each,
 which makes the wide update reproduce the magnitude-space step exactly.
 Appendix A.4 states what the proof needs from this as (MAG).
 
-Both paths use this. The complement read is what makes the drift enumeration
-start from a two-ulp interval rather than one (Appendix B), and that cost is
-priced into the constants of §2 for GCD and Jacobi alike. Where the Jacobi symbol
-needs exact low bits of the magnitude rather than an off-by-one window — its
-per-step factors read `a mod 4` — it takes them from the low limb alone, as
-`(!a_lo).wrapping_add(1)` under the sign mask: the borrow of a two's-complement
-negation propagates upward only, so the lowest limb is exact without touching
-the rest of the operand.
+Both the GCD and Jacobi paths use the complement read. It is what makes the
+drift enumeration start from a two-ulp interval rather than one (Appendix B),
+and that cost is priced into the constants of §2 for GCD and Jacobi alike. Where
+the Jacobi symbol needs exact low bits of the magnitude rather than an
+off-by-one window — its per-step factors read `a mod 4` — it takes them from the
+low limb alone, as `(!a_lo).wrapping_add(1)` under the sign mask: the borrow of
+a two's-complement negation propagates upward only, so the lowest limb is exact
+without touching the rest of the operand.
 
 That trick is scoped to Stage 1. The transition into Stage 2 performs the one
 genuine full-width negation `b` ever needs; from there `GcdPair::gcd_small`
@@ -303,20 +365,20 @@ Appendix A proves that this budget always suffices. The argument in brief:
    batch starts with `L + m ≤ 2E`. When the budget is spent, `E ≤ 1/2`, which
    forces `m = 0`.
 3. **Each batch preserves the invariant.** A batch has to reduce `L + m` by `S`,
-   less whatever headroom the invariant already leaves. Call a subtract step
-   *banded* if the high words differ by less than `2^SPLIT_THRESHOLD_BITS`.
-   A wrong comparison needs the high words to be closer than the drift bound
-   `Δ`, which is below that threshold, so every step before the first banded
-   step compares correctly. Then:
+   less whatever slack the invariant already leaves. Call a subtract step
+   *banded* if the high words differ by less than `2^SPLIT_THRESHOLD_BITS`. A
+   wrong comparison needs the high words to be closer than the drift bound `Δ`,
+   which is below that threshold, so every step before the first banded step
+   compares correctly. Then:
    - with no banded step, all `S` steps are correct and each removes at least
      one bit;
    - at the first banded step the two operands agree in all but their last
      few high-word bits (the threshold plus the drift), so subtracting them
      removes enough bits for the whole batch at once, and nothing later in the
      batch can give those bits back;
-   - if the operands don't fill the extraction window, the shortfall is paid
-     from the invariant's headroom, which is why the window sits a full word
-     below `E` (§3).
+   - if the operands don't fill the extraction window, the larger operand sits
+     far enough below `E` to cover the shortfall, which is why the window sits a
+     full word below `E` (§3).
 4. **The drift bound** `Δ(S)` (how far the high words can wander from the true
    operands over `S` steps) is computed exactly by enumerating the error
    recurrence (Appendix B). It fixes `SPLIT_THRESHOLD_BITS` and `S` together,
@@ -336,14 +398,12 @@ batch boundary.
 since every executed step's swap has to be certifiably correct to keep the
 running reciprocity sign trustworthy. GCD needs no such thing: a wrong
 comparison there costs a sign, which the sign folding of §3 absorbs at the next
-application. A halted batch's last executed step is the banded step of
-Appendix A.5, and it
-is the only one whose comparison can have been wrong — so it is the only step
-whose symbol bookkeeping can be wrong, and only if it did diverge.
+application. A halted batch's last executed step is the banded step of Appendix
+A.5, and it is the only one whose comparison can have been wrong — so it is the
+only step whose symbol bookkeeping can be wrong, and only if it did diverge.
 
-**It corrects the symbol, not the state.** The batch keeps
-whatever the mis-swapped step left, and the running symbol absorbs the
-difference in one bit:
+**It corrects the symbol, not the state.** The batch keeps whatever the
+mis-swapped step left, and the running symbol absorbs the difference in one bit:
 
 ```
 neg = a' < 0
@@ -390,12 +450,11 @@ by the banded-step cases of Theorem 3 (Appendix A.5).
 
 ## 6. The variable-time implementation
 
-The constant-time paths above are constrained to a schedule that depends only
-on public bit widths, precisely so their memory access pattern and control flow
+The constant-time paths above are constrained to a schedule that depends only on
+public bit widths, precisely so their memory access pattern and control flow
 reveal nothing about the operands. The variable-time implementation in
-`pair_vartime.rs` is under no such constraint, and
-takes advantage of it in ways that would be unsound — or simply pointless — in
-the constant-time engine.
+`pair_vartime.rs` is under no such constraint, and takes advantage of it in ways
+that would be unsound — or simply pointless — in the constant-time engine.
 
 - **The window is re-measured, not scheduled.** `GcdPairVartime` tracks `a`'s
   actual bit length and shrinks its tracked width (`len`) from the operands'
@@ -435,10 +494,11 @@ is preserved, and A.6 derives the shrinking window of §3 as a by-product.
 ### A.1 Setup and the invariant
 
 Everything in this appendix is stated on **magnitudes**. The deferred sign of §3
-means an operand can be negative between batches, and the extraction reads it
-by bitwise complement, so the compact words the batch compares are magnitudes;
-`bitlen` below is the bit length of `|a|`, and a comparison is between `|a|`
-and `|b|`. A.4 shows the wide update agrees.
+means an operand can be negative between batches, and the extraction reads it by
+bitwise complement, so the compact words the batch compares are magnitudes. From
+here on `a` and `b` denote the two operands' magnitudes, so `bitlen a` is the
+bit length of `|a|` and a comparison is between `|a|` and `|b|`. A.4 shows the
+wide update agrees.
 
 For operands `a`, `b` at the start of a batch, write
 
@@ -446,64 +506,85 @@ For operands `a`, `b` at the start of a batch, write
     L = max(bitlen a, bitlen b),   m = min(bitlen a, bitlen b),   Φ = L + m
 ```
 
-where `E = (k_remain + 1)/2` is the reference position of §3's schedule, `W`
-above the extraction position, so `E_i = N − (S/2)·i`, and `E_i` may land on a
-half-bit. Primes mark post-batch quantities throughout, so `E' = E − S/2` and
-`ΔΦ = Φ − Φ'`.
+and write `Φ'` for the same quantity at the end of the batch.
 
-Absolute bit positions are not the natural coordinates here. The proof only
-needs distances below the schedule:
+`E = (k_remain + 1)/2` is the reference position of §3's schedule, `W` above the
+extraction position. It starts at `N`, falls by `S/2` per batch, and may land on
+a half-bit. The invariant carried across batches is:
 
-```
-    λ = E − L,        μ = E − m,        λ ≤ μ
-```
+> **(INV)** `Φ ≤ 2E`.
 
-The invariant carried across batches is:
+It holds initially, since `E₀ = N ≥ L ≥ m` gives `Φ₀ ≤ 2N = 2E₀`. Because `m` is
+the smaller of the two, the invariant also gives `m ≤ Φ/2 ≤ E`: the smaller
+operand never sits above the schedule position. Theorem 1 needs only this
+consequence; Theorem 2 needs the invariant itself. Any slack `2E − Φ` is what a
+batch can draw on when its own reduction falls short (A.5).
 
-> **(INV)** `Φ ≤ 2E`, equivalently `h = 2E − Φ = λ + μ ≥ 0`.
-
-`h` is the batch's headroom, and A.5 spends it. (INV) holds initially, since
-`E₀ = N ≥ L ≥ m` gives `Φ₀ ≤ 2N = 2E₀`. Theorems 1 and 2 need only the weaker
-`m ≤ E`, that is `μ ≥ 0`, immediate from `m ≤ Φ/2 ≤ E`.
-
-The extraction window is described in the same coordinates. It reads `3W` bits
-from a base `E_lo = E − W − r`, with `r ∈ [0, W)` the limb alignment (§3).
-Measured from that base, the larger operand reaches
+Absolute bit positions are not the natural coordinates for the window. Write
 
 ```
-    κ = L − E_lo = W + r − λ
+    λ = E − L
 ```
 
-so the window holds `j = min(W, κ)` significant bits of it, and the compact
-words' least significant bit has weight `2^σ` with `σ = L − j`. The normalizing
-shift puts the larger operand's top bit at the top of the high word when it can
-(`κ ≥ W`), and otherwise stops at the window base (`σ = E_lo`); the two agree at
-`κ = W`. `κ ≤ 0` means both operands lie below the window and the compact words
-are zero, and `κ > 3W` is the overflow flag of §3.
+for how far the larger operand sits below the schedule. The extraction window
+reads `3W` bits from a base `P ≤ E − W` (see the diagram in §3). The larger
+operand reaches `L − P` bits above that base, so the window holds
+`j = min(W, L − P)` significant bits of it. Because the base is at least a full
+word below `E`, the window falls short of a full word by no more than the larger
+operand sits below the schedule:
 
-A step is **banded** if it is a subtract step — `a` odd, so a comparison is
-made — whose compact words satisfy `|ah − bh| < 2^q`, and which is not one of
-the exact cases of §2. These are the steps at which the halt test of §2 stops a
-Jacobi batch, and the only ones whose comparison can be wrong (A.5).
+```
+    W − j  ≤  max(0, λ)
+```
 
-The symbols used in the rest of this appendix:
+The compact words' least significant bit has weight `2^σ` with `σ = L − j`: the
+normalizing shift puts the larger operand's top bit at the top of the high word
+when the window is full, and otherwise stops at the window base. `j ≤ 0` means
+both operands lie below the window and the compact words are zero; an operand
+with bits above the trip's top raises the overflow flag of §3.
+
+This describes Stage 1's scheduled extraction. In Stage 2 the extraction finds
+the operands' actual top bits, so the window is always full (`j = W`) and the
+operands are non-negative; everything below applies with `j = W`. Stage 3's
+single-word steps are exact, so each removes at least one bit while `E` falls by
+`½`, which preserves (INV) step by step.
+
+Write `e_a` for `a`'s representation error in units of `2^σ` — its compact word
+`ah` minus `a/2^σ` — and likewise `e_b`, and let `D = e_a − e_b`. Then
+
+```
+    (a − b) / 2^σ  =  (ah − bh) − D
+```
+
+and Appendix B bounds `|D|` by `Δ = Δ(S)` throughout a batch.
+
+Two constants follow from the implementation's parameters.
+`q = SPLIT_THRESHOLD_BITS`, so the halt threshold is `2^q`; and
+`g = bitlen(2^q + Δ)`, the gap bits, so that the separation a banded step can
+leave is below `2^(σ + g)`. Appendix B shows `S = W − g` at both word sizes.
+
+A step is **banded** if it is a subtract step — `a` odd, so a comparison is made
+— whose compact words at that step satisfy `|ah − bh| < 2^q`, and which is not
+one of the exact cases of §2. The first banded step of a Jacobi batch is the
+last one it executes: the halt test of §2 turns every later step into a no-op.
+Banded steps are also the only ones whose comparison can be wrong (A.5).
+
+The symbols used in the rest of this appendix, in the order defined:
 
 | Symbol | Meaning |
 |---|---|
-| `L`, `m` | larger and smaller operand bit length at the start of a batch (`m₀` where the start value matters) |
-| `Φ = L + m` | the quantity (INV) bounds |
-| `E = (k_remain + 1)/2` | schedule position; `E' = E − S/2` after the batch |
-| `h = 2E − Φ` | headroom; (INV) is `h ≥ 0` |
-| `λ = E − L`, `μ = E − m` | distances below the schedule; `h = λ + μ` |
-| `r` | limb alignment of the window base, `E_lo = E − W − r` |
-| `κ = W + r − λ` | how far the larger operand reaches above the window base |
-| `j = min(W, κ)` | significant bits of the larger operand in the window |
+| `L`, `m` | larger and smaller operand bit length at the start of a batch |
+| `Φ = L + m` | the quantity (INV) bounds; `Φ'` is its value at the end of the batch |
+| `E = (k_remain + 1)/2` | schedule position; it falls by `S/2` per batch |
+| `λ = E − L` | how far the larger operand sits below the schedule |
+| `P` | base of the extraction window, a limb boundary at or below `E − W` |
+| `j` | significant bits of the larger operand in the window; `W − j ≤ max(0, λ)` |
 | `σ = L − j` | the compact words' unit is `2^σ` |
+| `e_a`, `e_b`, `D` | representation errors in units of `2^σ`, and their difference |
+| `Δ = Δ(S)` | bound on `\|D\|` over a batch (Appendix B) |
 | `q = SPLIT_THRESHOLD_BITS` | the halt threshold is `2^q` |
-| `Δ = Δ(S)`, `T = ⌈Δ⌉` | drift bound and comparison-error threshold (Lemma 2, Appendix B) |
-| `β = bitlen(2^q + Δ)` | so that `S = W − β` (Appendix B) |
-| banded step | a subtract step with `|ah − bh| < 2^q` |
-| `C(j) = j − β + 1` | bits a banded step banks at window fill `j` (A.5) |
+| `g = bitlen(2^q + Δ)` | gap bits: a banded step leaves the operands within `2^(σ + g)`; `S = W − g` |
+| banded step | a subtract step with `\|ah − bh\| < 2^q` |
 
 ### A.2 Theorem 1 — soundness of the extraction
 
@@ -512,22 +593,31 @@ substitution that branch performs therefore yields one `MAX` and one zero, the
 comparison it produces is correct at every step of the batch, and no step of
 the batch is banded.*
 
-*Proof.* A flag fires exactly when an operand exceeds the top of the trip —
-equivalently, when its `κ` exceeds `3W` and the shift of §3 would have to be
-negative. The trip's top sits at or above `E + S`, and by (INV) the smaller
+*Proof.* A flag fires exactly when an operand has bits above the top of the
+trip. The trip's top sits at or above `E + S`, and by (INV) the smaller
 operand satisfies `m ≤ E < E + S`, so its flag cannot fire; at most one flag is
 raised, and the substitution yields exactly one `MAX` and one zero rather than
 two of either.
 
-The partner is then zero, and no step of the batch can make it nonzero: a step
-replaces the larger operand and leaves the other untouched. The marker stays
-above the halt threshold for the whole batch: the last comparison sees
-`MAX >> (S − 1)`, which is at least `2^q` because `S = W − q − 1`, with two bits
-to spare; raising `SPLIT_THRESHOLD_BITS` by more than two would need a shorter
-batch to keep this. So no step is banded, the ordering the batch reads is fixed
-for its whole duration, and it agrees with the truth because a flagged operand
-exceeds `E` by more than `S`, so its true bit length still exceeds `E ≥ m` after
-all `S` halvings. ∎
+The partner's compact word is then zero, and it stays zero for the whole batch:
+a halving keeps a zero word zero, and a subtract either reduces the marker's
+word or swaps the zero word, unchanged, into `b`.
+
+The marker's word loses at most one bit per step, so at the batch's last
+comparison it is still at least `MAX >> (S − 1) = 2^(q+2) − 1`, using
+`S = W − q − 1`. That is above the halt threshold `2^q`, so no step of the batch
+is banded, and every comparison reads the flagged operand as the larger.
+
+That reading is correct throughout. The trip's top lies above `E + W` (§3), so
+the flagged operand starts above `2^(E+W)`. Each step leaves it alone, halves
+it, or replaces it by half its difference with a partner below `2^E`, so after
+`k` steps it is still above `2^(E+W−k) − 2^E`. Every comparison happens within
+the first `S − 1 < W − 1` steps, where that exceeds `2^E`, while the partner is
+below `2^m ≤ 2^E`. ∎
+
+The margin is exactly one bit: the marker clears `2^(q+1)` but not `2^(q+2)`, so
+raising `SPLIT_THRESHOLD_BITS` by more than one without shortening the batch
+would break this theorem.
 
 The certainty here rests on the zero, not on any gap between magnitudes — one
 side stays exactly zero however far the marker has been halved. That is what
@@ -537,118 +627,106 @@ carries dominance, not magnitude.
 
 ### A.3 Theorem 2 — termination
 
-*Under (INV), the algorithm has reached `m = 0` by the time the step budget is
-exhausted.*
+*If (INV) holds at the start of every batch that begins with `m > 0`, the
+algorithm has reached `m = 0` by the time the step budget is exhausted.*
 
-*Proof.* The schedule and the counter are the same quantity. Both start at
-their full value and both fall by `S` per batch — `E` by `S/2` —
-so throughout the run
+*Proof.* Once `m = 0` it stays 0: the zero operand is even, so later steps only
+halve it. Otherwise every batch begins with `m > 0` and (INV) holds throughout.
+`E = (k_remain + 1)/2` is `N` at the start and falls by `S/2` per batch along
+with the counter. The last batch may overshoot, taking `k_remain` below zero;
+either way `E ≤ 1/2` once the budget is spent, and (INV) gives `Φ ≤ 2E ≤ 1`.
+Since `L ≥ m ≥ 0`, that forces `m = 0`. Nothing in this depends on how the
+budget was split between stages, only that each batch decrements the counter by
+the steps it was charged for.
 
-```
-    E  =  (k_remain + 1) / 2
-```
-
-which is `N` at `k_remain = 2N − 1` and `1/2` at `k_remain = 0`. The last batch
-may overshoot, taking `k_remain` below zero and `E` with it; either way
-`E ≤ 1/2` at exhaustion, and (INV) gives `Φ ≤ 2E ≤ 1`. Since `L ≥ m ≥ 0`, that
-forces `m = 0`. Nothing in this depends on how the budget was split between
-stages, only that each batch decrements the counter by the steps it was charged
-for.
-
-The surviving operand is the gcd. Every elementary step replaces one operand by
-`u ± v` and halves it, and the halving is always of an even value: the parity
-comes from the exact low word, so a step halves `a` only when `a` is even, and
-subtracts only when both are odd, in which case the difference is even. Every
-such step preserves `gcd(a, b)`, whether or not the comparison that chose it was
-correct, so reaching `m = 0` by any route leaves the other operand equal to the
-gcd. ∎
+The surviving operand is the gcd. Every elementary step either halves an operand
+or replaces one by half the difference of the two, and the halving is always of
+an even value: the parity comes from the exact low word, so a step halves `a`
+only when `a` is even, and subtracts only when both are odd, in which case the
+difference is even. Every such step preserves `gcd(a, b)`, whether or not the
+comparison that chose it was correct, so reaching `m = 0` by any route leaves
+the other operand equal to the gcd. ∎
 
 ### A.4 Three facts about a batch
 
 The first says the wide update tracks magnitudes, the second bounds what a batch
 can undo, and the third says when a comparison can be wrong at all.
 
-> **(MAG)** Up to and including the first banded step of A.5, every executed
-> step replaces the larger *magnitude* by `(larger − smaller)/2`, never by
-> `(larger + smaller)/2`.
+> **(MAG)** Every executed step before the first banded step (A.1) replaces
+> the larger *magnitude* by `(larger − smaller)/2`, and the first banded step
+> replaces one of the two by `|a − b|/2`, never by `(a + b)/2`.
 
 *Why it holds.* The matrix `M` a batch accumulates is a magnitude-space matrix,
-`(A', B')ᵀ = M·(A, B)ᵀ`, while the wide operands are `x = diag(s_a, s_b)·(A, B)ᵀ`
-with `s ∈ {±1}` the deferred signs. Since `diag(s)² = I`,
+`(a', b')ᵀ = M·(a, b)ᵀ`, while the wide operands carry the deferred signs,
+`diag(s_a, s_b)·(a, b)ᵀ` with `s_a, s_b ∈ {±1}`. Writing `diag(s)` for that sign
+matrix, `diag(s)² = I` gives
 
 ```
-    M·diag(s) · x  =  M·(A, B)ᵀ  =  (A', B')ᵀ
+    M·diag(s) · diag(s)·(a, b)ᵀ  =  M·(a, b)ᵀ  =  (a', b')ᵀ
 ```
 
 so folding the signs into `M`'s columns — one conditional negation each — makes
 the wide update compute the magnitude-space result exactly, and the batch
-proceeds as though begun on the non-negative pair `(A₀, B₀)`. A correct step
+proceeds as though begun on the non-negative pair `(a, b)`. A correct step
 replaces the larger of a non-negative pair by their halved difference and leaves
-both non-negative, so everything up to the first banded step is non-negative and
-`|a − b| = |A − B|` there.
+both non-negative, so everything up to the first banded step is non-negative.
 
 *Why it is scoped.* Past that step the claim is dropped, and must be: a
 divergence leaves one operand negative, after which the wide subtraction adds
 magnitudes. A.5 asks for no magnitude-subtraction bound beyond that point —
 only the non-regrowth argument, which runs on the compact words.
 
-Without the fold the wide update would compute `(A + B)/2` where it meant
-`(A − B)/2` whenever the two signs differ. That would not be a correctness bug —
-`gcd(A + B, B) = gcd(A, B)`, so the answer survives — but the magnitude *grows*,
+Without the fold the wide update would compute `(a + b)/2` where it meant
+`(a − b)/2` whenever the two signs differ. That would not be a correctness bug —
+`gcd(a + b, b) = gcd(a, b)`, so the answer survives — but the magnitude *grows*,
 and with it `Φ`. Lemma 1 and every reduction bound in A.5 would fail silently,
 on inputs that still produce the right gcd.
 
 **Lemma 1 (monotonicity).** *`L` is non-increasing across a batch, whether or
 not its comparisons were correct.*
 
-*Proof.* A step replaces one operand `u` by `(u ± v)/2` and leaves the other
-unchanged. Since `|u ± v| ≤ |u| + |v| ≤ 2^{L+1}`, the replacement has bit
-length at most `L`. ∎
+*Proof.* A step replaces one operand `u` by `u/2` or by `(u ± v)/2`, and leaves
+the other unchanged. Both are below `2^L`, the second because
+`|u ± v| ≤ |u| + |v| < 2^{L+1}`, so the replacement's bit length is at most `L`.
+∎
 
 Lemma 1 holds whether a step subtracts or adds magnitudes. The banked reduction
 of A.5 is a stronger claim, that the replaced operand drops to half the
 *difference* of the two, and it needs (MAG).
 
 **Lemma 2 (divergence threshold).** *A step's comparison can be wrong only if
-the two compact words differ by less than `T(S)`, the width of the
-representation-error interval after `S` steps.*
+`|ah − bh| ≤ |D|`.*
 
-*Proof.* Write `P = 2^σ` for the weight of the compact words' least significant
-bit, and `ρ = (true slot value) − (compact word)·P` for the representation
-error. A comparison is wrong when `|x| ≥ |y|` holds for the compact words while
-`|A| < |B|` holds for the true operands, which requires
-`(|x| − |y|)·P < ρ_b − ρ_a`. The threshold is the width of the `ρ` interval,
-which has two sources.
+*Proof.* Suppose the compact words say `ah ≥ bh` while truly `a < b`. Then
+`(a − b)/2^σ = (ah − bh) − D < 0`, so `0 ≤ ah − bh < D`; the mirror case gives
+`D ≤ ah − bh < 0`. Either way `|ah − bh| ≤ |D|`. ∎
 
-The first is the **initial truncation**, worth two ulps. Both paths read the
-same scheduled trip over deferred-sign operands (§3): the shift is capped so no
-bits below the window base are fabricated, which holds the truncation itself to
-one ulp, and a negative operand is read by bitwise complement, which is `|x| − 1`
-and costs the second. The interval is `[−1, 1)` per operand, the same on both
-paths, and the extraction re-establishes it from scratch at every batch, so
-nothing carries over from the previous one.
-
-The second is **accumulation**. Decomposing `ρ_j = P·F_j + (u₀ρ₀ᵃ + v₀ρ₀ᵇ)/2^j`,
-the second term is at most one ulp, since each row of the batch matrix
-satisfies `|u| + |v| ≤ 2^j`. The first term `F` — the accumulated floor error
-of the compact recurrence — obeys the same recurrence as the compact words
-themselves and depends only on the compact start state and the parity sequence,
-never on the operands. It can therefore be bounded by exhaustive enumeration of
-a fixed-width recurrence rather than a search over operand space. ∎
+`D` has two sources, both accounted for in Appendix B. The first is the
+**initial truncation**. The compact word is the true value rounded down to the
+window's unit, so each error starts in `(−1, 0]`; the extraction caps its
+normalizing shift so that no bits below the window base are fabricated, which
+keeps this to one ulp. A negative operand `a` is read by bitwise complement,
+which is `|a| − 1` and can cost one more, so each error starts in `(−2, 0]`, the
+same on both paths, and every batch's read re-establishes it from scratch. The
+second is **accumulation**: each halving drops a bit from a compact word that
+the true operand keeps, so the errors evolve by a small affine recurrence that
+depends on the sequence of step kinds and never on the operands' values.
 
 ### A.5 Theorem 3 — the invariant is preserved
 
-**Theorem 3.** *(INV) is preserved by every batch.*
+**Theorem 3.** *(INV) is preserved by every batch that begins with `m > 0`.*
 
-*Proof.* We must show `Φ' ≤ 2E'`, that is
+*Proof.* After the batch `E` has fallen by `S/2`, so we must show
 
 ```
-    ΔΦ  ≥  S − h
+    Φ'  ≤  2E − S
 ```
 
-so what a batch owes is `S`, less whatever headroom it starts with.
+By (INV) at the start of the batch, `Φ ≤ 2E`, so it is always enough to show
+`Φ' ≤ Φ − S`: a batch owes `S` bits of reduction, less any slack `2E − Φ` it
+starts with.
 
-**The band.** A wrong comparison needs `|ah − bh| ≤ |D| ≤ Δ < 2^q` (Lemma 2),
+**The band.** By Lemma 2 a wrong comparison needs `|ah − bh| ≤ |D| ≤ Δ < 2^q`,
 so
 
 > every step before the first banded step has a correct comparison,
@@ -658,87 +736,108 @@ and Jacobi paths agree about which step matters and differ only in what they do
 after it.
 
 **No banded step.** Then every comparison in the batch is correct and all `S`
-steps execute. Each replaces the larger operand by `(larger − smaller)/2`,
-reducing its bit length by at least one while the other is untouched, so
-`ΔΦ ≥ S ≥ S − h`. This includes the overflow case, which Theorem 1 shows is
-never banded.
+steps execute. Each either halves an even operand or replaces the larger by
+`(larger − smaller)/2`; either way one operand loses at least a bit and the
+other is untouched, so `Φ' ≤ Φ − S`, unless an operand reaches zero during the
+batch, after which nothing more is owed (A.3). This includes the overflow case,
+which Theorem 1 shows is never banded.
 
 **A banded step.** Otherwise let `d` be the first. The step is executed on both
-paths — on the halting path `unhalted` goes false only for the steps *after*
-it — and by (MAG) it replaces the larger magnitude by `|A − B|/2`, whether or
-not its comparison was correct. With `(a − b)/2^σ = (ah − bh) − D`,
+paths — on the halting path `unhalted` goes false only for the steps *after* it
+— and by (MAG) it replaces one operand by `|a − b|/2`, whether or not its
+comparison was correct. With `(a − b)/2^σ = (ah − bh) − D`,
 
 ```
-    |a − b| / 2^σ  ≤  |ah − bh| + |D|  ≤  (2^q − 1) + Δ  <  2^β
+    |a − b| / 2^σ  ≤  |ah − bh| + |D|  ≤  (2^q − 1) + Δ  <  2^g
 ```
 
 The first term is the compact words' separation, at most `2^q − 1` at a banded
 step; the second is the error in that separation. So the replaced operand ends
-below `2^(σ + β − 1)`, a bit length of at most `σ + β − 1 = L − C(j)`. Writing
-`ℓ` for the bit length of the other operand, the larger of the two at step `d`,
+below `2^(σ + g − 1)`, and `σ + g − 1 = L − (S + 1) + (W − j)`. Write `ℓ` for
+the bit length of the operand the step leaves alone. Just after step `d`, then,
 
 ```
-    ΔΦ  ≥  (L + m₀) − (L − C(j)) − ℓ  =  C(j) + m₀ − ℓ               (‡)
+    Φ  ≤  L − (S + 1) + (W − j) + ℓ                                  (‡)
 ```
 
-At a full window `C(W) = W − β + 1 = S + 1`, so one banded step banks one bit
-more than the batch owes. What remains is to bound `ℓ`, and the two cases
-differ only in how.
+At a full window, and with `ℓ = m`, that is the starting `Φ` less `S + 1`: one
+banded step removes one bit more than the batch owes, less any shortfall `W − j`
+in the window and any growth `ℓ − m` of the operand left alone. What remains is
+to bound `ℓ`. That depends on where the larger operand sits relative to the
+schedule and, when it is above, on how far apart the two operands are, which
+gives three cases:
 
-**Case 1: `L ≤ E + ½`, i.e. `2λ + 1 ≥ 0`.** Lemma 1 gives `ℓ ≤ L`, so
-`ΔΦ ≥ C(j) − (L − m₀)`. Against the obligation `S − h = W − β − h`, and using
-`h − (L − m₀) = 2λ`, this closes if
+| Case | Condition | How `ℓ` is bounded |
+|---|---|---|
+| 1 | `L ≤ E + ½` | `ℓ ≤ L` (Lemma 1); the larger operand's distance below `E` covers any window shortfall |
+| 2 | `L ≥ E + 1` and `m ≥ L − S` (operands close) | `ℓ ≤ m + 1` from the step's history |
+| 3 | `L ≥ E + 1` and `m < L − S` (operands far apart) | `ℓ ≤ m`: the smaller operand is never replaced |
 
-```
-    j − W + 1 + 2λ  ≥  0
-```
+They cover every configuration, since `λ = E − L` is a multiple of `½`.
 
-When the window is full, `j = W` and this is the case condition itself. When it
-is short, `j = κ = W + r − λ < W`, so `λ > r ≥ 0`, and the condition reads
-`λ + r + 1 ≥ 0`, which holds with room to spare. The shortfall `W − j` in what
-the banded step banks is paid from the headroom `2λ`, which is why the window
-base sits a full word below `E`: with the base only `o < W` bits below `E`, the
-condition would read `λ + r + 1 ≥ W − o`, which fails for small `r`. Nothing
-here needs the operands to fill the window: `κ ≤ 0`, where both lie below it, is
-included.
-
-**Case 2: `L ≥ E + 1`, i.e. `λ ≤ −1`.** The two cases cover every
-configuration, since `λ` is a multiple of `½`. Now `κ = W + r − λ > W`, so the
-window is full, `j = W` and `σ + β = L − S`. Lemma 1 is not enough here, and `ℓ`
-is bounded from the step's history instead. Every step before `d` was correct,
-and a correct step replaces the larger and leaves the smaller untouched, so the
-smaller operand's bit length is still at most `m₀` at step `d`; and the bound
-above puts the larger within `2^(σ + β)` of it. Together,
+**Case 1: `L ≤ E + ½`, i.e. `2λ + 1 ≥ 0`.** Lemma 1 gives `ℓ ≤ L`, so (‡) is at
+most `2L − (S + 1) + (W − j)`. That is at most `2E − S` exactly when
+`2λ + 1 ≥ W − j`, and since `W − j ≤ max(0, λ)` it is enough that
 
 ```
-    ℓ  ≤  max(m₀, L − S) + 1
+    2λ + 1  ≥  max(0, λ)
 ```
 
-Which term wins is a property of the window: the smaller operand's compact word
-carries `c = m₀ − σ = W − (L − m₀)` significant bits, and `m₀ ≥ L − S` is
-exactly `c ≥ β`.
+Against `0` this is the case condition itself, and against `λ` it reads
+`λ ≥ −1`, which holds too. So when the larger operand is at or below the
+schedule, its distance below `E` pays for any shortfall in the window, operands
+entirely below it included. It does so because the window base sits a full word
+below `E`: with the base only `o < W` bits below `E`, the shortfall bound
+becomes `max(0, λ + W − o)`, and the condition `λ ≥ W − o − 1` fails when the
+larger operand sits just below the schedule.
 
-- **`c ≥ β`.** Then `ℓ ≤ m₀ + 1`, and (‡) gives `ΔΦ ≥ C(W) − 1 = S`. The extra
-  bit is the straddle case: the two operands are close enough for drift to
-  reverse them but sit either side of a power of two, so the survivor can be one
-  bit longer than the batch's starting minimum. One banded step still covers the
-  whole batch, with no appeal to `h`. This is what fixes `S` one below the
-  longest batch the drift bound certifies: `h = 0` is admissible here (for
-  example `L = E + 1`, `m = E − 1`), and at `S = W − β + 1` this branch would
-  bank only `S − 1`.
-- **`c < β`.** The compact larger starts at `2^(W−1)` and each step replaces it
-  by `⌊(ah − bh)/2⌋`, so writing `u = ah + bh` gives `u_{k+1} ≥ u_k/2 − 1` and
-  hence `ah_k ≥ 2^(W−1−k) − bh − 2`. At the batch's last step,
-  `k = S − 1 = W − β − 1`, that is `2^β − bh − 2`, and `bh ≤ 2^(β−1) − 1`, so
-  `ah ≥ bh` throughout: **the compact comparison never swaps**, and the smaller
-  operand is untouched for the whole batch. (At both word sizes the minimum of
-  `ah − bh` over the batch is 2, at the final step with `c = β − 1`.) A wrong
-  comparison therefore leaves the true larger as the survivor, so `ℓ = m₀`
-  exactly, and (‡) gives `ΔΦ ≥ C(W) = S + 1`.
+**Setup for Cases 2 and 3.** Now `L ≥ E + 1`, i.e. `λ ≤ −1`, so `max(0, λ) = 0`:
+the window is full, `j = W` and `σ + g = L − S`. It is not the overflow case,
+which has no banded step (Theorem 1). Lemma 1's `ℓ ≤ L` is no longer enough,
+since it would need Case 1's condition `2λ + 1 ≥ 0`, so `ℓ` is bounded from the
+step's history instead. Every step before `d` was correct, and a correct step
+never increases the smaller operand's bit length, so the smaller is still at
+most `m` bits at step `d`. The banded step's bound `|a − b| < 2^(σ + g)` puts
+the larger within `2^(σ + g)` of it. The operand the step leaves alone is one of
+these two, so
 
-Both cases bound `Φ` at step `d + 1`. Two things remain: why a batch that stops
-early is charged as though it ran to the end, and why the steps after `d` cannot
-give the banked reduction back.
+```
+    ℓ  ≤  max(m, L − S) + 1
+```
+
+The smaller operand's compact word carries `m − σ` significant bits, so
+`m ≥ L − S` is exactly `m − σ ≥ g`: whether the smaller operand reaches `g` bits
+inside the window decides which term wins, and which case applies.
+
+**Case 2: `L ≥ E + 1` and `m ≥ L − S`, the operands close.** Then `ℓ ≤ m + 1`,
+and (‡) gives `Φ ≤ L + m − S`, the starting `Φ` less `S`. The `+ 1` is the
+straddle case: the two operands are close enough for drift to reverse them but
+sit either side of a power of two, so the survivor can be one bit longer than
+the batch's starting minimum. One banded step still covers the whole batch
+without drawing on any slack, and it has to: (INV) allows `Φ = 2E` here (for
+example `L = E + 1`, `m = E − 1`). This is what fixes `S` one below the longest
+batch the drift bound certifies, since at `S = W − g + 1` this case would remove
+only `S − 1` bits.
+
+**Case 3: `L ≥ E + 1` and `m < L − S`, the operands far apart.** Write `x` and
+`y` for the larger and smaller compact words, wherever they sit. The smaller
+operand's compact word has fewer than `g` significant bits, so
+`y ≤ 2^(g−1) − 1`, while `x` starts at least at `2^(W−1)`. If the larger operand
+starts in `b`, the first subtract step swaps it into `a`, correctly, since the
+gap is far above the band. From then on each step leaves `x` alone (while `y` is
+halved), halves it, or replaces it by `⌊(x − y)/2⌋`, so `x + y` never falls
+below half its value minus one, and after `k` steps `x ≥ 2^(W−1−k) − y − 2`. At
+the batch's last step, `k = S − 1 = W − g − 1`, that is `x ≥ 2^g − y − 2 ≥ y`,
+using `y ≤ 2^(g−1) − 1`. So **no comparison after the first can swap**, and the
+smaller operand is never replaced for the whole batch; at most it is halved. (At
+both word sizes the minimum of `x − y` over the batch is 2, at the final step
+with `m − σ = g − 1`.) The operand the banded step leaves alone is therefore the
+smaller one, whether or not the comparison was right, so `ℓ ≤ m`, and (‡) gives
+`Φ ≤ L + m − S − 1`.
+
+All three cases bound `Φ` at step `d + 1`. Two things remain: why a batch that
+stops early is charged as though it ran to the end, and why the steps after `d`
+cannot give the banked reduction back.
 
 **A halted batch is charged in full.** The bound is taken at step `d + 1`, and
 the paths differ only in what follows it. On the halting path nothing does —
@@ -747,27 +846,48 @@ the paths differ only in what follows it. On the halting path nothing does —
 justifies charging a full batch of `S` steps to one that executed `d + 1 < S`:
 what pays for a batch is the banded step's cancellation, not a step count.
 
-**The banked reduction is kept.** For the batch that runs on, two facts compose.
+**The banked reduction is kept.** On the GCD path the batch runs on after step
+`d`, and two facts bound what the remaining steps can do.
 
-The compact words are running an ordinary binary GCD on themselves —
-self-consistent and non-negative, because each step subtracts whichever of the
-two the *compact* comparison judged smaller — so by Lemma 1 applied to them,
-neither the larger nor the smaller ever grows: `|x_h,k| ≤ |x_h,d+1|` for every
-`k ≥ d + 1`. And Lemma 2's error accounting holds at every step of the batch,
-with the scale `σ` fixed for its whole duration and `|D_k| ≤ Δ(S)` at every
-`k ≤ S`, so
+First, by Lemma 1 applied from step `d + 1`, the larger operand never exceeds
+its bit length at step `d + 1`.
 
-```
-    |X_k|  ≤  (|x_h,k| + Δ)·2^σ  ≤  (|x_h,d+1| + Δ)·2^σ        for all k ≥ d + 1
-```
+Second, the smaller operand stays below `2^(σ + g − 1)`. The compact words run
+an ordinary binary GCD on themselves, so the smaller compact word never grows: a
+step either halves one word, or replaces the word the compact comparison judged
+larger by half the difference, or (on a swap) keeps the word judged smaller and
+replaces the other by half the difference. In each case the smaller of the two
+is at most what it was. At step `d + 1` it is at most the word the banded step
+produced, `⌊|ah − bh|/2⌋ ≤ 2^(q−1) − 1`.
 
-Taking bit lengths, `bitlen(X_k) ≤ σ + bitlen(|x_h,d+1| + Δ)` — the `Δ` inside
-the `bitlen`, which is what keeps a fixed additive error from buying a bit at a
-power-of-two boundary. The barrier is that bound, and it is set once at step
-`d + 1` and never moves. ∎
+The true operands follow their compact words closely: each error stays within
+`(Δ + 1)/2` for the whole batch. Appendix B bounds only the difference `D`, but
+by induction each single error is bounded too. It starts within `2`, which is at
+most `(Δ + 1)/2` since `Δ ≥ 3` at both word sizes. A halving drops a bit
+`γ ∈ {0, ½}` and gives `|e/2 − γ| ≤ |e|/2 + ½`; a subtract sets the stepped
+error to `±(e_a − e_b)/2 − γ`, at most `(|D| + 1)/2`; and a swap only copies an
+existing error. The same recurrence holds after a wrong comparison, because the
+compact words and the true operands go through the same linear steps. So the
+smaller true operand stays below `(2^(q−1) − 1 + (Δ + 1)/2)·2^σ`, which is under
+`2^(σ + g − 1)` at both word sizes (Appendix B).
 
-With the base case `Φ₀ ≤ 2N`, this establishes (INV) for every batch, which is
-what Theorems 1 and 2 rest on.
+With these, each case's bound at step `d + 1` still holds at the end of the
+batch:
+
+- **Case 1.** The larger is at most `L` bits (Lemma 1 from the start of the
+  batch) and the smaller at most `σ + g − 1`, which is what (‡) used with
+  `ℓ ≤ L`.
+- **Case 2.** At step `d + 1` the two operands have at most `σ + g − 1` and
+  `ℓ ≤ m + 1` bits, and `σ + g − 1 = L − S − 1 < m`, so the larger is at most
+  `m + 1` bits and stays there; with the smaller at most `σ + g − 1`, this is
+  what (‡) used with `ℓ ≤ m + 1`.
+- **Case 3.** No comparison after the first swaps, so the smaller operand is
+  never replaced and keeps at most `m` bits. The other is at most
+  `max(σ + g − 1, m) = σ + g − 1` bits by Lemma 1 from step `d + 1`, which is
+  what (‡) used with `ℓ ≤ m`. ∎
+
+With the base case `Φ₀ ≤ 2N`, this establishes (INV) for every batch that begins
+with `m > 0`, which is what Theorems 1 and 2 rest on.
 
 ### A.6 Corollary — the operating window shrinks
 
@@ -796,9 +916,9 @@ actual values, so the narrowing itself stays public and data-independent.
 
 ### B.1 The bound
 
-Write `D` for the difference of the two operands' representation errors, in
-ulps of the compact word, and `Δ(S)` for the largest `|D|` reachable within a
-batch of `S` steps. `T(S) = ⌈Δ(S)⌉` is then Lemma 2's threshold.
+`D` is the difference of the two operands' representation errors (A.1), and
+`Δ(S)` the largest `|D|` reachable within a batch of `S` steps. Its ceiling
+`T(S) = ⌈Δ(S)⌉` sets the halt threshold, `q = bitlen(T)`.
 
 **Where the constant comes from.** `Δ(S)` is a maximum over an enumeration of
 the error recurrence: a two-dimensional affine system with three
@@ -834,35 +954,33 @@ solving against `W` instead would give `S = 59` and `S = 28`, one longer, and
 Case 2 of A.5 shows what that step is worth.
 
 The same inequality has a second reading, which is why one constant serves both
-purposes. Rearranged as `S ≤ W − bitlen(2^SPLIT_THRESHOLD_BITS + Δ)`, it says
-the batch is strictly shorter than what a single divergent step can pay for at a
-full window; A.5 uses it in that form to close the termination proof, and shows
-separately that a partial window pays for itself out of headroom. Solved as
-`S + bitlen(T) ≤ W`, it says the threshold and the batch length together fit the
-word, which is what makes the halt test sound. The two differ by exactly one
-step at both word sizes, and banking is the binding one: a batch length whose
-reduction a single divergence covers certifies its own comparisons with a bit in
-hand.
+purposes. Rearranged as `S ≤ W − g`, with
+`g = bitlen(2^SPLIT_THRESHOLD_BITS + Δ)`, it says the batch is strictly shorter
+than what a single banded step can pay for at a full window; A.5 uses it in that
+form to close the termination proof, and shows separately that a partial window
+is paid for by the larger operand's distance below the schedule. Solved as
+`S + bitlen(T) ≤ W`, it says the overflow marker of §3 stays above the halt
+threshold for a whole batch (Theorem 1). The two differ by exactly one step at
+both word sizes, and banking is the binding one, so the marker condition holds
+with a step in hand.
 
 ### B.2 The enumeration
 
 The verification behind B.1: the model whose maximum `Δ(S)` is, why that model
 over-approximates a concrete batch safely, and the exact values at the two
-supported word sizes. Notation is B.1's — `D` the difference of the two
-representation errors, `σ` the common scale, `q = SPLIT_THRESHOLD_BITS`.
+supported word sizes. Notation is A.1's.
 
-**The enumeration, concretely.** Track the two errors as a pair
-`(α, β_err)`, each the compact word minus the true slot value at the common
-scale, and let `D = α − β_err`. Lemma 2 puts each in the half-open `[−1, 1)`;
-the enumeration uses the **closed** `[−1, 1]`, which contains it, so what it
-computes is an upper bound for the real reachable set and a maximum on a
-compact one. Each step applies one of three maps, with `γ ∈ {0, ½}` the bit the
+**The enumeration, concretely.** Track the pair of errors `(e_a, e_b)` of A.1,
+with `D = e_a − e_b`. Lemma 2's discussion puts each in the half-open `(−2, 0]`;
+the enumeration uses the **closed** `[−2, 0]`, which contains it, so what it
+computes is an upper bound for the real reachable set and a maximum on a compact
+one. Each step applies one of three maps, with `γ ∈ {0, ½}` the bit the
 arithmetic shift drops:
 
 ```
-    halve      a even          α' = α/2 − γ
-    subtract   a odd, a ≥ b    α' = (α − β_err)/2 − γ
-    swapsub    a odd, a < b    α' = (β_err − α)/2 − γ,   β_err' = α
+    halve      a even          e_a' = e_a/2 − γ
+    subtract   a odd, a ≥ b    e_a' = (e_a − e_b)/2 − γ
+    swapsub    a odd, a < b    e_a' = (e_b − e_a)/2 − γ,   e_b' = e_a
 ```
 
 Enumerate by carrying the convex hull of the reachable set forward `S` steps in
@@ -871,15 +989,15 @@ exact rationals, and read `Δ(S) = max|D|` off the vertices.
 **The model over-approximates; the hull is exact for the model.** These are two
 separate claims.
 
-`R_concrete ⊆ R_abstract`. A concrete execution does not choose freely among
-the three maps — parity fixes halve against subtract, the compact comparison
-fixes which subtract ordering runs — whereas the enumeration allows all three
-at every step, and widens Lemma 2's half-open `[−1, 1)` to the closed
-`[−1, 1]`. Both widenings are sound because neither constraint restricts the
-adversary: the parity sequence is a function of unconstrained operands, and
-both subtract orderings are reachable wherever a comparison can be wrong, which
-is precisely where `D` is large. So `Δ(S)` is a **safe upper bound** on the
-concrete drift, not the implementation's exact reachable maximum.
+`R_concrete ⊆ R_abstract`. A concrete execution does not choose freely among the
+three maps — parity fixes halve against subtract, the compact comparison fixes
+which subtract ordering runs — whereas the enumeration allows all three at every
+step, and widens the half-open `(−2, 0]` to the closed `[−2, 0]`. Both widenings
+are sound because neither constraint restricts the adversary: the parity
+sequence is a function of unconstrained operands, and both subtract orderings
+are reachable wherever a comparison can be wrong, which is precisely where `D`
+is large. So `Δ(S)` is a **safe upper bound** on the concrete drift, not the
+implementation's exact reachable maximum.
 
 For the model itself the hull loses nothing. Every map is affine, and the
 dropped bit contributes a Minkowski sum with `[−½, 0]` — the convex hull of the
@@ -893,12 +1011,15 @@ depends on sampling.
 **The constants, certified.** Everything A.5 needs is a rational
 comparison at two values of `S`:
 
-| `W` | `S` | `Δ(S)` exact | `T = ⌈Δ⌉` | `q` | `2^q` | `2^q + Δ` | `β` |
+| `W` | `S` | `Δ(S)` exact | `T = ⌈Δ⌉` | `q` | `2^q` | `2^q + Δ` | `g` |
 |---|---|---|---|---|---|---|---|
 | 64 | 58 | `3186546936343924281 / 2^57` | 23 | 5 | 32 | 54.111 | 6 |
 | 32 | 27 | `790393287 / 2^26` | 12 | 4 | 16 | 27.778 | 5 |
 
 with `q = SPLIT_THRESHOLD_BITS = bitlen(T)`. Reading off: `Δ < 2^q` at both
 sizes, with the tightest margin at `W = 64` (22.111 against 32); and
-`2^q + Δ ≤ 2^β` with `β` as tabulated, the tightest again at `W = 64` (54.111
-against 64). Both are exact rational facts about the two numerators above.
+`2^q + Δ ≤ 2^g` with `g` as tabulated, the tightest again at `W = 64` (54.111
+against 64). A.5's bound on the smaller operand after a banded step also needs
+`2^(q−1) − 1 + (Δ + 1)/2 < 2^(g−1)`: 26.556 against 32 at `W = 64`, and 13.389
+against 16 at `W = 32`. All three are exact rational facts about the two
+numerators above.
