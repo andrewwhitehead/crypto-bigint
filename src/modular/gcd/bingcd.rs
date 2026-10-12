@@ -31,6 +31,27 @@ impl BingcdMatrix {
         k: 0,
     };
 
+    /// Assembles a batch's matrix from its unsigned entries, deriving `pattern` from them rather
+    /// than tracking it step by step.
+    ///
+    /// Each step multiplies the unsigned entries by `[[1, 1], [2, 0]]` when it swaps (determinant
+    /// `-2`) and by `[[1, 1], [0, 2]]` or `[[1, 0], [0, 2]]` otherwise (determinant `2`), so
+    /// `r0.0 * r1.1 - r0.1 * r1.0 = ±2^k`, positive exactly when `pattern` is set. With
+    /// `k <= Word::BITS - 2` the two cases already differ in the top bit of the wrapping product.
+    /// (A halted [`partial_xgcd`] batch must call this before its final top-row shift, which
+    /// scales the determinant beyond that range.)
+    #[inline(always)]
+    pub(crate) const fn from_entries(r0: (Word, Word), r1: (Word, Word), k: u32) -> Self {
+        debug_assert!(k <= Word::BITS - 2);
+        let det = (r0.0.wrapping_mul(r1.1)).wrapping_sub(r0.1.wrapping_mul(r1.0));
+        Self {
+            r0: (Limb(r0.0), Limb(r0.1)),
+            r1: (Limb(r1.0), Limb(r1.1)),
+            pattern: word::choice_from_msb(det).not(),
+            k,
+        }
+    }
+
     /// Expands the compact `(r0, r1, pattern)` representation into a full [`SignedLimbMatrix`],
     /// assigning each entry its true sign from the shared `pattern` bit: within each row the two
     /// columns get opposite signs, and the two rows are likewise each other's opposite.
@@ -245,7 +266,6 @@ pub const fn partial_xgcd<const HALTING: bool>(
     // All decisions are carried as full-width masks, each derived once per step, rather than as
     // `Choice` values: every conversion of a `Choice` to a mask is an optimization barrier.
     let (mut r0_0, mut r0_1, mut r1_0, mut r1_1): (Word, Word, Word, Word) = (1, 0, 0, 1);
-    let mut pattern: Word = 1;
     let mut i = 0;
     let mut jacobi_neg: Word = 0;
     let mut real_steps = 0;
@@ -278,7 +298,6 @@ pub const fn partial_xgcd<const HALTING: bool>(
             (r1_0 ^ (swap & (r1_0 ^ r0_0))) << 1,
             (r1_1 ^ (swap & (r1_1 ^ r0_1))) << 1,
         );
-        pattern ^= swap & 1;
 
         // `(b|a) = -(a|b) iff a = b = 3 mod 4` (quadratic reciprocity) when a swap occurred.
         jacobi_neg ^= swap & a_b & (a_b >> 1);
@@ -302,17 +321,16 @@ pub const fn partial_xgcd<const HALTING: bool>(
         }
     }
 
+    // `pattern` is derived before a halted batch's top-row shift: at this point the determinant
+    // is `±2^steps` (the skipped steps having doubled only the bottom row), whereas the shift
+    // scales it again and can push it past the top bit `from_entries` reads.
+    let mut m = BingcdMatrix::from_entries((r0_0, r0_1), (r1_0, r1_1), steps);
     if HALTING {
-        r0_0 <<= steps - real_steps;
-        r0_1 <<= steps - real_steps;
+        m.r0 = (
+            m.r0.0.shl(steps - real_steps),
+            m.r0.1.shl(steps - real_steps),
+        );
     }
-
-    let m = BingcdMatrix {
-        r0: (Limb(r0_0), Limb(r0_1)),
-        r1: (Limb(r1_0), Limb(r1_1)),
-        pattern: Choice::from_u8_lsb(pattern as u8),
-        k: steps,
-    };
     (m, jacobi_neg & 1, Choice::from_u8_lsb(unhalted as u8))
 }
 
@@ -329,7 +347,6 @@ pub const fn partial_xgcd_word(mut a: Word, mut b: Word, steps: u32) -> (Word, B
     debug_assert!(b & 1 == 1, "b must be odd");
 
     let (mut r0_0, mut r0_1, mut r1_0, mut r1_1): (Word, Word, Word, Word) = (1, 0, 0, 1);
-    let mut pattern: Word = 1;
     let mut i = 0;
 
     while i < steps {
@@ -342,18 +359,14 @@ pub const fn partial_xgcd_word(mut a: Word, mut b: Word, steps: u32) -> (Word, B
             (r1_0 ^ (swap & (r1_0 ^ r0_0))) << 1,
             (r1_1 ^ (swap & (r1_1 ^ r0_1))) << 1,
         );
-        pattern ^= swap & 1;
 
         i += 1;
     }
 
-    let m = BingcdMatrix {
-        r0: (Limb(r0_0), Limb(r0_1)),
-        r1: (Limb(r1_0), Limb(r1_1)),
-        pattern: Choice::from_u8_lsb(pattern as u8),
-        k: steps,
-    };
-    (b, m)
+    (
+        b,
+        BingcdMatrix::from_entries((r0_0, r0_1), (r1_0, r1_1), steps),
+    )
 }
 
 /// [`partial_xgcd`]'s variable-time counterpart, used by the vartime GCD/XGCD/Jacobi-symbol paths:
@@ -435,6 +448,9 @@ pub const fn partial_xgcd_vartime(
         jacobi_neg ^= borrow as Word & (a_b >> 1);
     }
 
+    // Unlike the constant-time batches, `pattern` is tracked per step here: this loop only
+    // iterates on subtract steps and its batches are often short, so the per-batch determinant
+    // in `BingcdMatrix::from_entries` would cost more than it saves.
     m.k = max_batch - steps_remain;
     m.pattern = if pattern { Choice::TRUE } else { Choice::FALSE };
     (m, jacobi_neg & 1)
@@ -580,5 +596,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Checks the `pattern` that `BingcdMatrix::from_entries` derives against the sign of the
+    /// exact determinant, for `HALTING` batches that actually halt. The single-word inputs above
+    /// are exact and never halt, so `a_hi` is drawn close to `b_hi` here to land subtract steps in
+    /// the ambiguity band.
+    #[cfg(feature = "rand_core")]
+    #[test]
+    #[allow(clippy::cast_possible_truncation)]
+    fn partial_xgcd_halting_pattern() {
+        use crate::{Choice, Random, Uint, Word, modular::gcd::SPLIT_BATCH_SIZE};
+        use chacha20::ChaCha8Rng;
+        use rand_core::SeedableRng;
+
+        let mut rng = ChaCha8Rng::seed_from_u64(7);
+        let mut word = || Uint::<1>::random_from_rng(&mut rng).limbs[0].0;
+        let mut halted = 0;
+        for _ in 0..100_000 {
+            let (a_lo, b_lo, b_hi, r) = (word(), word() | 1, word(), word());
+            // Low bits of `r` pick the case; the rest supply a small offset or a fresh word.
+            let a_hi = if r & 1 == 0 {
+                b_hi.wrapping_add(r >> (Word::BITS - 24 + ((r >> 1) as u32 & 15)))
+            } else {
+                word()
+            };
+            let exact = Choice::from_u8_lsb((r >> 8) as u8 & (r >> 9) as u8);
+
+            let (m, _, unhalted) =
+                super::partial_xgcd::<true>((a_lo, a_hi), (b_lo, b_hi), exact, SPLIT_BATCH_SIZE);
+            let det = i128::from(m.r0.0.0) * i128::from(m.r1.1.0)
+                - i128::from(m.r0.1.0) * i128::from(m.r1.0.0);
+            assert!(det.unsigned_abs().is_power_of_two());
+            assert_eq!(
+                det > 0,
+                m.pattern.to_bool(),
+                "a=({a_lo:#x},{a_hi:#x}) b=({b_lo:#x},{b_hi:#x})"
+            );
+            halted += u32::from(!unhalted.to_bool());
+        }
+        assert!(halted > 1_000, "only {halted} batches halted");
     }
 }
